@@ -1,5 +1,7 @@
 # Input Language Popup
 
+[![CI](https://github.com/DIMOSUS/InputLanguagePopup/actions/workflows/ci.yml/badge.svg)](https://github.com/DIMOSUS/InputLanguagePopup/actions/workflows/ci.yml)
+
 A tiny background (tray) application for Windows that shows the **currently active
 keyboard layout** next to the text caret whenever you switch layouts from the
 keyboard — with the toggle hotkey configured in Windows (**`Ctrl+Shift`** or
@@ -81,6 +83,29 @@ dotnet publish src\InputLanguagePopup\InputLanguagePopup.csproj -c Release -r wi
 
 The result is a single `InputLanguagePopup.exe` (~50 MB) in `.\publish\` that runs on
 any Windows 10/11 x64 machine without a pre-installed .NET runtime.
+
+---
+
+## Continuous integration & releases
+
+Two GitHub Actions workflows (`.github/workflows/`):
+
+* **CI** (`ci.yml`) — builds and runs the unit tests on `windows-latest` for every
+  push and pull request to `main`.
+* **Release** (`release.yml`) — triggered by pushing a `v*` tag. It runs the tests,
+  publishes the single-file self-contained x64 executable (with the version stamped
+  from the tag), and attaches it to an automatically-created GitHub Release with
+  generated release notes.
+
+To cut a release:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+A tag containing a hyphen (e.g. `v1.1.0-beta`) is published as a pre-release. The
+downloadable asset is named `InputLanguagePopup-<tag>-win-x64.exe`.
 
 ---
 

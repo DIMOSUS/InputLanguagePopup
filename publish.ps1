@@ -12,13 +12,19 @@
 .PARAMETER Output
     Output directory (default: .\publish).
 
+.PARAMETER Version
+    Optional version to stamp into the assembly (e.g. "1.2.3"). Used by the
+    release workflow, which derives it from the git tag.
+
 .EXAMPLE
     .\publish.ps1
     .\publish.ps1 -Output C:\Tools\InputLanguagePopup
+    .\publish.ps1 -Version 1.2.3
 #>
 param(
     [string]$Configuration = "Release",
-    [string]$Output = "$PSScriptRoot\publish"
+    [string]$Output = "$PSScriptRoot\publish",
+    [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,14 +32,22 @@ $project = Join-Path $PSScriptRoot "src\InputLanguagePopup\InputLanguagePopup.cs
 
 Write-Host "Publishing $project ..." -ForegroundColor Cyan
 
-dotnet publish $project `
-    -c $Configuration `
-    -r win-x64 `
-    --self-contained true `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true `
-    -o $Output
+$publishArgs = @(
+    $project,
+    "-c", $Configuration,
+    "-r", "win-x64",
+    "--self-contained", "true",
+    "-p:PublishSingleFile=true",
+    "-p:IncludeNativeLibrariesForSelfExtract=true",
+    "-p:EnableCompressionInSingleFile=true",
+    "-o", $Output
+)
+
+if ($Version) {
+    $publishArgs += "-p:Version=$Version"
+}
+
+dotnet publish @publishArgs
 
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE."
