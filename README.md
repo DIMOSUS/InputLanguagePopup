@@ -8,6 +8,10 @@ keyboard — with the toggle hotkey configured in Windows (**`Ctrl+Shift`** or
 **`Alt+Shift`**, read live from the system settings so no restart is needed after
 changing it) as well as the hardwired **`Win+Space`** switcher.
 
+<p align="center">
+  <img src="media/screen0.png" alt="The EN layout indicator shown next to the text caret" width="220">
+</p>
+
 * It **does not** switch the language itself.
 * It **does not** reserve, intercept, or block any of these combinations — Windows
   keeps handling the switch normally.
@@ -18,13 +22,6 @@ The indicator appears:
 
 1. next to the **text caret** in the active application, or
 2. next to the **mouse cursor** when the caret cannot be located.
-
-```
- ┌────┐
- │ RU │      ┌────┐   ┌────┐
- └────┘      │ EN │   │ LT │
-             └────┘   └────┘
-```
 
 ---
 
