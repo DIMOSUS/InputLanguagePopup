@@ -40,11 +40,13 @@ layered popup near the caret (or the mouse cursor).
 | `LayoutHotkeyGestureDetector` | Pure, Win32-independent state machine that recognises the layout-switch gestures: clean `Ctrl+Shift` / `Alt+Shift` chords and `Win+Space` (incl. `Win+Shift+Space`). Reports *which* gesture completed; auto-discards state older than 10 s. Fully unit-tested. |
 | `SystemHotkeyService` | Reads `HKCU\Keyboard Layout\Toggle` (per completed gesture, off the hot path) to decide which chord actually switches layouts on this system — settings changes apply without restart. |
 | `InputLanguageService` | Foreground window → thread id → `GetKeyboardLayout`; converts the HKL to a display code (`RU`/`EN`/`LT`/ISO). Resolves the layout-owning window for consoles (`ImmGetDefaultIMEWnd`) and UWP/Steam hosts (focus child). Composes the popup text, appending `CAPS` when CapsLock is on. |
+| `CapsLockTracker` | Tracks the CapsLock toggle by observing physical `VK_CAPITAL` events from the hook (auto-repeat ignored), since `GetKeyState` on the tray thread does not see the foreground app's input. |
+| `DpiProbeWindow` | A tiny never-shown Per-Monitor-V2 window used only to read a monitor's true DPI (`GetDpiForWindow` on our own handle) without moving the visible popup. |
 | `CaretLocator` | Cascades the three position strategies and returns a screen rectangle + its source. |
 | `Win32CaretLocator` | Strategy 1 — system caret via `GetGUIThreadInfo` + `ClientToScreen`. Skipped for Qt/Telegram windows, whose system caret is bogus. |
-| `MsaaCaretLocator` | Strategy 2 — MSAA (`oleacc`) `AccessibleObjectFromWindow(OBJID_CARET)` + `IAccessible::accLocation`, queried against the thread's focus/caret window. Cheap; covers many Chromium/Electron apps where the system caret is absent. |
-| `UiAutomationCaretLocator` | Strategy 3 — COM UI Automation `TextPattern2.GetCaretRange`, on a dedicated MTA worker thread. Single-flight (one request at a time), per-call timeout and a post-timeout cooldown so a hung provider degrades to the cursor instead of piling up work. Honours the caret's `isActive` flag and expands a degenerate range to a character to get a rectangle. |
-| `CursorFallbackLocator` | Strategy 4 — mouse cursor via `GetCursorPos`. |
+| `AccessibilityCaretLocator` | Strategy 2 — MSAA then UI Automation on **one** long-lived MTA worker. MSAA: `AccessibleObjectFromWindow(OBJID_CARET)` + `IAccessible::accLocation` against the thread's focus/caret window (covers many Chromium/Electron apps). UIA: `TextPattern2.GetCaretRange` (honours `isActive`, expands a degenerate range). Both cross into the target process and can block, so the whole chain is wrapped in single-flight + per-call timeout + post-timeout cooldown — a hung provider degrades to the cursor and never accumulates blocked probes. |
+| `MsaaCaretLocator` | Raw MSAA caret lookup (called on the accessibility worker). |
+| `CursorFallbackLocator` | Strategy 3 — mouse cursor via `GetCursorPos`. |
 | `PopupPositionService` | Turns a caret rectangle into a final physical-pixel placement: per-monitor DPI, configured offsets, work-area clamping (handles negative coordinates). |
 | `LanguagePopupForm` | Display-only borderless, click-through, non-activating **layered** popup (per-pixel alpha via `UpdateLayeredWindow`). Reused across shows. |
 | `SettingsService` / `AppSettings` | Load/save JSON settings with defaults + clamping. |
@@ -61,9 +63,10 @@ layered popup near the caret (or the mouse cursor).
   because it must return to `CallNextHookEx` within the OS low-level-hook timeout.
   No UI Automation, no caret lookup, no blocking calls. The delegate is held in a
   field so the GC cannot collect it. The gesture detector auto-discards state older
-  than 10 s, so key-ups lost to the secure desktop (UAC) cannot leave modifiers
-  virtually held. `SystemEvents.SessionSwitch` (lock/unlock, RDP, fast user switch)
-  additionally resets the detector, marshalled onto the UI thread.
+  than 10 s (aged **per key**, refreshed by auto-repeat), so a key-up lost to the
+  secure desktop (UAC) cannot leave that key virtually held — even while the user keeps
+  typing. `SystemEvents.SessionSwitch` (lock/unlock, RDP, fast user switch) additionally
+  resets the detector and re-syncs CapsLock, marshalled onto the UI thread.
 * **UI thread** — starts the detection sequence, assigns each chord a monotonically
   increasing **request id**, cancels the previous request's `CancellationTokenSource`,
   and shows/updates the popup. UI mutations happen only here, via `Control.BeginInvoke`
@@ -71,13 +74,15 @@ layered popup near the caret (or the mouse cursor).
 * **Thread-pool** — the two delayed layout/caret probes run here (`ConfigureAwait(false)`),
   so the UI thread is never blocked while a probe (which may call into UI Automation)
   is in progress.
-* **UI Automation MTA worker** — a single long-lived background thread owns the COM
-  `IUIAutomation` object. An in-process COM call cannot be forcibly aborted, so the
-  worker uses *containment*: a single-flight gate means at most one request is ever
-  in flight (extras return immediately → cursor fallback, so the queue never grows);
-  the caller waits at most the timeout; and after a timeout UI Automation is skipped
-  for a short cooldown. A permanently hung provider therefore just keeps UI
-  Automation disabled instead of leaking work items.
+* **Accessibility MTA worker** — a single long-lived background thread runs the whole
+  MSAA→UIA chain and owns the COM `IUIAutomation` object. Both MSAA and UIA cross into
+  the target process and can block, and neither can be cancelled once in flight, so the
+  chain uses *containment*: a single-flight gate means at most one request runs at a
+  time (extras return immediately → cursor fallback, so the thread-pool never
+  accumulates blocked probes and the queue never grows); the caller waits at most the
+  timeout; and after a timeout the whole accessibility chain is skipped for a short
+  cooldown. A permanently hung provider just keeps the chain disabled instead of leaking
+  work items.
 
 **Staleness protection:** each chord's request id is checked again on the UI thread
 before the popup is shown, and a newer chord cancels the previous request's token, so an
@@ -100,12 +105,14 @@ The process is **Per-Monitor V2** DPI aware (declared in `app.manifest`, mirrore
 monitor's last column/row does not pick the neighbour), reads its work area
 (`GetMonitorInfo`), scales the popup size and offsets, and clamps the result to that
 monitor's work area — correctly handling monitors placed left of / above the primary
-(negative coordinates). The DPI scale is read from the **popup's own** Per-Monitor-V2
-window (park it, still hidden, on the anchor's monitor, then `GetDpiForWindow` on our
-handle). This gives the target monitor's true effective DPI regardless of the foreground
-app's DPI awareness — `GetDpiForWindow` on a foreign (DPI-unaware or system-aware) window
-would report the wrong value. The pure geometry lives in `ComputeLocation` and is covered
-by unit tests (mixed DPI, edge flips, negative-origin monitors).
+(negative coordinates). The DPI scale is read from a dedicated, **never-shown**
+Per-Monitor-V2 helper window (`DpiProbeWindow`): park it on the anchor's monitor, then
+`GetDpiForWindow` on that handle. This gives the target monitor's true effective DPI
+regardless of the foreground app's DPI awareness — `GetDpiForWindow` on a foreign
+(DPI-unaware or system-aware) window would report the wrong value — and, crucially, it
+never touches the **visible** popup (probing that during the second layout check would
+move it off its computed position). The pure geometry lives in `ComputeLocation` and is
+covered by unit tests (mixed DPI, edge flips, negative-origin monitors).
 
 ## The popup window
 
@@ -132,7 +139,8 @@ instance is created once at startup and reused for every show.
 
 **Layout → code** (BCL) `CultureInfo`, LANGID extracted from the low word of the HKL.
 
-**CapsLock** (`user32`) `GetKeyState(VK_CAPITAL)`.
+**CapsLock** — tracked from hook `VK_CAPITAL` events (`CapsLockTracker`); `GetKeyState(VK_CAPITAL)`
+only for the initial baseline and session-switch re-sync.
 
 **System caret** (`user32`)
 `GetGUIThreadInfo` (`GUITHREADINFO`, `hwndCaret`, `rcCaret`), `ClientToScreen`.
@@ -195,14 +203,14 @@ desktop session (recommended check for the user).
 
 * Solution builds with **0 warnings / 0 errors** (Debug and Release), CI green on
   `windows-latest`.
-* **57 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
-  cancellation incl. a key held *before* the chord, auto-repeat, and staleness for both
-  modifiers and ordinary keys), system-hotkey interpretation, popup positioning (mixed
-  DPI, edge flips, negative-origin monitors), settings normalization, and the CapsLock
-  text composition.
-* The **MSAA** (`accLocation`, vtable slot 22) and updated **UI Automation** interop were
-  validated end-to-end against a focused control (real caret coordinates, no access
-  violation).
+* **63 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
+  cancellation incl. a key held *before* the chord, auto-repeat, and per-key staleness —
+  including a key stuck while the user keeps typing), CapsLock tracking (toggle,
+  auto-repeat, resync), system-hotkey interpretation, popup positioning (mixed DPI, edge
+  flips, negative-origin monitors), settings normalization, and CapsLock text composition.
+* The **MSAA** (`accLocation`, slot 22) + **UI Automation** chain on the bounded worker
+  returns real caret coordinates; the **`DpiProbeWindow`** returns per-monitor DPI and does
+  **not** move the visible popup during a second probe — both validated at runtime.
 * The app launches, installs the hook, writes logs, creates the correct camelCase
   `settings.json`, and **recovers from a corrupt settings file** (quarantines it and writes
   defaults — verified live); force-stop leaves a clean state.

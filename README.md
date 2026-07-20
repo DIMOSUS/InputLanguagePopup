@@ -32,7 +32,10 @@ system caret (`GetGUIThreadInfo`) → MSAA (`oleacc`) → UI Automation
 
 ## Requirements
 
-* Windows 10 or Windows 11, **x64**
+* **Windows 11 x64.** Windows 10 22H2 x64 works on a best-effort basis (the
+  self-contained binary bundles its own runtime), but note that regular Windows 10
+  Home/Pro is no longer in Microsoft's supported-OS matrix for .NET 10 — only certain
+  LTSC/Enterprise editions are — so it is tested but not officially supported.
 * To build: **.NET 10 SDK** (`dotnet --version` → `10.x`)
 * To run the published binary: **nothing** — it is self-contained.
 

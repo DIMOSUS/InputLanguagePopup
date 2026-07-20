@@ -87,25 +87,6 @@ public sealed class LanguagePopupForm : Form
     }
 
     /// <summary>
-    /// The DPI scale (1.0 = 96 DPI) of the monitor containing <paramref name="anchor"/>,
-    /// read from this popup's own window. The popup is Per-Monitor-V2 aware, so unlike
-    /// <c>GetDpiForWindow</c> on a foreign (possibly DPI-unaware or system-aware) app
-    /// window, this always returns the target monitor's true effective DPI. The window
-    /// is moved while still hidden, so there is no flicker. Must be called on the UI
-    /// thread, before <see cref="ShowPopup"/>.
-    /// </summary>
-    public double GetDpiScaleForPoint(Point anchor)
-    {
-        // Park the (hidden) window on the anchor's monitor so GetDpiForWindow reports
-        // that monitor. No SWP_SHOWWINDOW → it stays hidden; ShowPopup repositions it.
-        SetWindowPos(Handle, IntPtr.Zero, anchor.X, anchor.Y, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-
-        var dpi = GetDpiForWindow(Handle);
-        return dpi > 0 ? dpi / 96.0 : 1.0;
-    }
-
-    /// <summary>
     /// Show (or refresh) the popup with the given text and placement. Restarts the
     /// hide timer. Must be called on the UI thread.
     /// </summary>

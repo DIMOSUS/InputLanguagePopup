@@ -28,11 +28,13 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private readonly GlobalKeyboardHook _hook;
     private readonly LayoutHotkeyGestureDetector _detector;
+    private readonly CapsLockTracker _capsLock;
     private readonly SystemHotkeyService _systemHotkeys;
     private readonly InputLanguageService _languageService;
     private readonly CaretLocator _caretLocator;
     private readonly PopupPositionService _positionService;
     private readonly LanguagePopupForm _popupForm;
+    private readonly DpiProbeWindow _dpiProbe;
 
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _enabledItem;
@@ -64,13 +66,18 @@ public sealed class TrayApplicationContext : ApplicationContext
         _caretLocator = new CaretLocator(logger, settings);
         _positionService = new PopupPositionService(settings);
         _popupForm = new LanguagePopupForm(logger);
+        _dpiProbe = new DpiProbeWindow();
 
         _detector = new LayoutHotkeyGestureDetector();
         _detector.GestureRecognized += OnGestureRecognized;
 
+        _capsLock = new CapsLockTracker(IsCapsLockOn());
+
         _hook = new GlobalKeyboardHook(logger);
         _hook.KeyDown += _detector.OnKeyDown;
         _hook.KeyUp += _detector.OnKeyUp;
+        _hook.KeyDown += _capsLock.OnKeyDown;
+        _hook.KeyUp += _capsLock.OnKeyUp;
 
         // --- Tray icon + menu ---
         _enabledItem = new ToolStripMenuItem("Enabled", null, OnToggleEnabled)
@@ -136,7 +143,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             if (!_popupForm.IsDisposed)
             {
-                _popupForm.BeginInvoke(new Action(_detector.Reset));
+                _popupForm.BeginInvoke(new Action(() =>
+                {
+                    _detector.Reset();
+                    // The CapsLock state may have changed on the lock screen.
+                    _capsLock.Resync(IsCapsLockOn());
+                }));
             }
         }
         catch (InvalidOperationException)
@@ -329,9 +341,9 @@ public sealed class TrayApplicationContext : ApplicationContext
             return; // stale request or disabled
         }
 
-        var text = InputLanguageService.ComposeDisplayText(probe.Code, IsCapsLockOn());
+        var text = InputLanguageService.ComposeDisplayText(probe.Code, _capsLock.IsOn);
         var logicalSize = LanguagePopupForm.MeasureLogicalSize(text);
-        var dpiScale = _popupForm.GetDpiScaleForPoint(PopupPositionService.GetAnchorPoint(probe.Caret));
+        var dpiScale = _dpiProbe.GetScaleForPoint(PopupPositionService.GetAnchorPoint(probe.Caret));
         var placement = _positionService.Compute(probe.Caret, logicalSize, dpiScale);
 
         // On the second check, avoid re-showing (and restarting the timer) if
@@ -404,7 +416,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             var hkl = _languageService.GetForegroundLayout(out _);
             var code = _languageService.GetDisplayCode(hkl) ?? "EN";
-            var text = InputLanguageService.ComposeDisplayText(code, IsCapsLockOn());
+            var text = InputLanguageService.ComposeDisplayText(code, _capsLock.IsOn);
 
             if (!GetCursorPos(out var pt))
             {
@@ -412,7 +424,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
 
             var caret = new CaretResult(CaretSource.CursorFallback, new Rectangle(pt.X, pt.Y, 0, 0));
-            var dpiScale = _popupForm.GetDpiScaleForPoint(PopupPositionService.GetAnchorPoint(caret));
+            var dpiScale = _dpiProbe.GetScaleForPoint(PopupPositionService.GetAnchorPoint(caret));
             var placement = _positionService.Compute(caret, LanguagePopupForm.MeasureLogicalSize(text), dpiScale);
             _popupForm.ShowPopup(text, placement, _settings.PopupDurationMs);
         }
@@ -439,7 +451,13 @@ public sealed class TrayApplicationContext : ApplicationContext
             // moving the portable executable.
             if (_settings.StartWithWindows)
             {
-                _startupService.SetEnabled(true);
+                if (!_startupService.SetEnabled(true))
+                {
+                    // Could not register (e.g. running under the dotnet host during
+                    // development, or a registry error). Do not clobber the persisted
+                    // intent, but do not claim success either.
+                    _logger.Warn("Autostart is requested but could not be registered right now.");
+                }
             }
             else if (_startupService.IsEnabled())
             {
@@ -449,6 +467,19 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             _logger.Error("Failed to reconcile autostart setting.", ex);
+        }
+        finally
+        {
+            // Show the tray checkbox as the *actual* registry state, so the UI never
+            // claims autostart is on when the entry is absent.
+            try
+            {
+                _startupItem.Checked = _startupService.IsEnabled();
+            }
+            catch
+            {
+                // ignore
+            }
         }
     }
 
@@ -504,9 +535,12 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             _hook.KeyDown -= _detector.OnKeyDown;
             _hook.KeyUp -= _detector.OnKeyUp;
+            _hook.KeyDown -= _capsLock.OnKeyDown;
+            _hook.KeyUp -= _capsLock.OnKeyUp;
             _hook.Dispose();
 
             _caretLocator.Dispose();
+            _dpiProbe.Dispose();
 
             _trayIcon.Visible = false;
             _trayIcon.Icon?.Dispose();

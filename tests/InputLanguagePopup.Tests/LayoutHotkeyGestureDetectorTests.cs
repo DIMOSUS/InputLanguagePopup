@@ -542,7 +542,7 @@ public class LayoutHotkeyGestureDetectorTests
     }
 
     [Fact]
-    public void SlowChord_WithGapsUnderTimeout_StillFires()
+    public void SlowChord_WithAutoRepeatRefresh_StillFires()
     {
         long now = 0;
         var d = new LayoutHotkeyGestureDetector(() => now);
@@ -552,10 +552,40 @@ public class LayoutHotkeyGestureDetectorTests
         var step = LayoutHotkeyGestureDetector.StaleChordTimeoutMs - 1_000;
         d.OnKeyDown(VK_LCONTROL);
         now += step;
+        d.OnKeyDown(VK_LCONTROL); // auto-repeat refreshes Ctrl
         d.OnKeyDown(VK_LSHIFT);
         now += step;
+        d.OnKeyDown(VK_LCONTROL); // auto-repeat
+        d.OnKeyDown(VK_LSHIFT);   // auto-repeat
         d.OnKeyUp(VK_LSHIFT);
-        now += step;
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);
+    }
+
+    [Fact] // Stuck key expires even while other keys keep firing (a global timer would not)
+    public void StuckKey_WhileTypingContinuously_ExpiresAndChordFires()
+    {
+        long now = 0;
+        var d = new LayoutHotkeyGestureDetector(() => now);
+        var fired = new List<LayoutGesture>();
+        d.GestureRecognized += g => fired.Add(g);
+
+        d.OnKeyDown(VK_S); // its key-up is lost
+
+        // Keep typing T once a second for 15 s — never a >10 s global idle gap.
+        for (var i = 1; i <= 15; i++)
+        {
+            now = i * 1000;
+            d.OnKeyDown(VK_T);
+            d.OnKeyUp(VK_T);
+        }
+
+        // The stuck S (last seen at t=0) has aged past the timeout and is gone, so
+        // this chord is clean and fires.
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyDown(VK_LSHIFT);
+        d.OnKeyUp(VK_LSHIFT);
         d.OnKeyUp(VK_LCONTROL);
 
         Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);

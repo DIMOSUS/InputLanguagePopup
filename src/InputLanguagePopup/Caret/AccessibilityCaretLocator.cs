@@ -10,65 +10,72 @@ using InputLanguagePopup.Interop;
 namespace InputLanguagePopup.Caret;
 
 /// <summary>
-/// Strategy 2: the caret via COM UI Automation TextPattern2.GetCaretRange.
+/// The accessibility caret strategies — MSAA (oleacc) then, if enabled, COM UI
+/// Automation — run together on <b>one</b> long-lived MTA worker thread.
 ///
-/// UI Automation calls can block if the target provider is slow or hung, and must
-/// never run on the keyboard-hook thread. Work is marshalled to a single
-/// long-lived MTA worker thread. Because an in-process COM call cannot be forcibly
-/// aborted, robustness is achieved by containment rather than cancellation:
+/// Both cross into the target application's process (MSAA via <c>WM_GETOBJECT</c>,
+/// UIA via COM) and can block if a provider hangs; neither can be cancelled once
+/// in flight. Since a hung provider hangs both anyway, they share a single
+/// containment wrapper:
 ///
-///  * <b>Single-flight</b> — at most one request is ever in flight. If a request
-///    arrives while the worker is busy, the caller gets <see cref="CaretResult.NotFound"/>
-///    immediately (and falls back to the cursor). The queue therefore never grows.
+///  * <b>Single-flight</b> — at most one request runs at a time; while busy, callers
+///    get <see cref="CaretResult.NotFound"/> immediately (→ cursor fallback), so the
+///    thread-pool never accumulates blocked probes and the queue never grows.
 ///  * <b>Timeout</b> — the caller waits at most <c>timeoutMs</c>. A hung provider
-///    keeps the worker (and the single-flight slot) occupied; it is simply never
-///    freed, so UI Automation stays disabled until the call returns — instead of
-///    piling up work and leaking events.
-///  * <b>Cooldown</b> — after a timeout, UI Automation is skipped entirely for a
-///    short window, so a transient stall does not cause repeated 150 ms waits.
+///    keeps the single worker occupied but leaks nothing.
+///  * <b>Cooldown</b> — after a timeout, the whole accessibility chain is skipped
+///    for a short window so a transient stall does not cause repeated waits.
+///
+/// The on-screen check is applied inside the chain so an off-screen MSAA rectangle
+/// still lets UI Automation be tried before giving up.
 /// </summary>
-public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
+public sealed class AccessibilityCaretLocator : IDisposable
 {
     private const int CooldownMs = 5000;
+    private const int TextUnit_Character = 0;
 
     private readonly Logger _logger;
+    private readonly MsaaCaretLocator _msaa;
     private readonly int _timeoutMs;
     private readonly Func<long> _ticks;
     private readonly BlockingCollection<Action> _queue = new();
     private readonly Thread _worker;
     private volatile bool _disposed;
 
-    // Single-flight gate: 0 = free, 1 = a request is in flight. Released by the
-    // worker when (if) it finishes the current request.
-    private int _busy;
-
-    // Ticks until which UI Automation is skipped after a timeout.
-    private long _cooldownUntil;
-
-    // The in-flight request's completion source (only one at a time).
+    private int _busy;              // 0 = free, 1 = in flight
+    private long _cooldownUntil;    // ticks until which the chain is skipped
     private TaskCompletionSource<CaretResult>? _current;
 
-    // Owned by the worker thread only.
+    // Request parameters (set under the single-flight gate; read on the worker).
+    private IntPtr _fg;
+    private uint _tid;
+    private bool _useUia;
+
+    // UIA COM object — worker-thread only.
     private IUIAutomation? _automation;
 
-    public UiAutomationCaretLocator(Logger logger, int timeoutMs = 150, Func<long>? tickProvider = null)
+    public AccessibilityCaretLocator(Logger logger, int timeoutMs = 150, Func<long>? tickProvider = null)
     {
         _logger = logger;
+        _msaa = new MsaaCaretLocator(logger);
         _timeoutMs = timeoutMs;
         _ticks = tickProvider ?? (static () => Environment.TickCount64);
 
         _worker = new Thread(WorkerLoop)
         {
             IsBackground = true,
-            Name = "UIAutomationCaretWorker",
+            Name = "AccessibilityCaretWorker",
         };
-        // MTA: the UIA COM client does not require a message pump there, and a hung
-        // call can safely be abandoned by the caller.
         _worker.SetApartmentState(ApartmentState.MTA);
         _worker.Start();
     }
 
-    public CaretResult TryLocate(IntPtr foregroundWindow, uint threadId)
+    /// <summary>
+    /// Locate the caret via MSAA and (if <paramref name="useUia"/>) UI Automation,
+    /// bounded by the single-flight/timeout/cooldown wrapper. Returns
+    /// <see cref="CaretResult.NotFound"/> immediately if busy or in cooldown.
+    /// </summary>
+    public CaretResult TryLocate(IntPtr foregroundWindow, uint threadId, bool useUia)
     {
         if (_disposed)
         {
@@ -78,15 +85,17 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
         var now = _ticks();
         if (Volatile.Read(ref _cooldownUntil) > now)
         {
-            // Still recovering from a recent timeout — skip UI Automation.
             return CaretResult.NotFound;
         }
 
-        // Single-flight: bail out immediately if the worker is already busy.
         if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
         {
             return CaretResult.NotFound;
         }
+
+        _fg = foregroundWindow;
+        _tid = threadId;
+        _useUia = useUia;
 
         var tcs = new TaskCompletionSource<CaretResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         _current = tcs;
@@ -97,21 +106,18 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Error("Failed to enqueue UI Automation work.", ex);
+            _logger.Error("Failed to enqueue accessibility work.", ex);
             Volatile.Write(ref _busy, 0);
             return CaretResult.NotFound;
         }
 
         if (tcs.Task.Wait(_timeoutMs))
         {
-            // The worker completed and has already released the single-flight slot.
             return tcs.Task.Result;
         }
 
-        // Timed out: the worker still owns the slot (it will release it if/when the
-        // COM call returns). Put UI Automation on cooldown so we do not keep waiting.
         Volatile.Write(ref _cooldownUntil, _ticks() + CooldownMs);
-        _logger.Warn($"UI Automation caret lookup timed out after {_timeoutMs} ms; cooling down for {CooldownMs} ms.");
+        _logger.Warn($"Accessibility caret lookup timed out after {_timeoutMs} ms; cooling down for {CooldownMs} ms.");
         return CaretResult.NotFound;
     }
 
@@ -121,22 +127,42 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
         var result = CaretResult.NotFound;
         try
         {
-            result = LocateOnWorker();
+            result = LocateChain(_fg, _tid, _useUia);
         }
         catch (Exception ex)
         {
-            _logger.Error("UI Automation caret lookup threw.", ex);
+            _logger.Error("Accessibility caret lookup threw.", ex);
         }
         finally
         {
-            // Release the slot *before* completing, so a waiter that already timed
-            // out (or a fresh request) can proceed immediately.
             Volatile.Write(ref _busy, 0);
             tcs?.TrySetResult(result);
         }
     }
 
-    private CaretResult LocateOnWorker()
+    private CaretResult LocateChain(IntPtr fg, uint tid, bool useUia)
+    {
+        var msaa = _msaa.TryLocate(fg, tid);
+        if (msaa.IsValid && ScreenBounds.IsOnScreen(msaa.Bounds))
+        {
+            return msaa;
+        }
+
+        if (!useUia)
+        {
+            return CaretResult.NotFound;
+        }
+
+        var uia = LocateViaUia();
+        if (uia.IsValid && ScreenBounds.IsOnScreen(uia.Bounds))
+        {
+            return uia;
+        }
+
+        return CaretResult.NotFound;
+    }
+
+    private CaretResult LocateViaUia()
     {
         IUIAutomationElement? element = null;
         IUIAutomationTextPattern2? textPattern = null;
@@ -195,8 +221,6 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
         }
     }
 
-    private const int TextUnit_Character = 0;
-
     private static CaretResult RectsFromRange(IUIAutomationTextRange range)
     {
         if (range.GetBoundingRectangles(out var rects) < 0 || rects is null)
@@ -251,16 +275,15 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
         {
             foreach (var work in _queue.GetConsumingEnumerable())
             {
-                // Isolate item failures: an exception escaping a single work item
-                // must not kill the loop, or every later request would silently
-                // time out for the rest of the session.
+                // Isolate item failures so one exception cannot kill the loop and
+                // silently time out every later request for the rest of the session.
                 try
                 {
                     work();
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error("UI Automation work item failed.", ex);
+                    _logger.Error("Accessibility work item failed.", ex);
                 }
             }
         }
@@ -270,7 +293,7 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Error("UI Automation worker loop terminated unexpectedly.", ex);
+            _logger.Error("Accessibility worker loop terminated unexpectedly.", ex);
         }
         finally
         {
@@ -296,8 +319,8 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
             // ignore
         }
 
-        // The worker may be stuck in a hung COM call; it is a background thread and
-        // will not block process exit regardless.
+        // The worker may be stuck in a hung provider call; it is a background thread
+        // and will not block process exit regardless.
         _worker.Join(TimeSpan.FromMilliseconds(500));
         _queue.Dispose();
     }

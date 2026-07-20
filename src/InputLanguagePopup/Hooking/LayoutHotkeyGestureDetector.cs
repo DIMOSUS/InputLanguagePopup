@@ -49,10 +49,11 @@ public sealed class LayoutHotkeyGestureDetector
         Win = 8,
     }
 
-    private readonly HashSet<int> _pressedKeys = new();          // held modifier keys
-    private readonly HashSet<int> _pressedNonModifiers = new();  // held ordinary keys
+    // Held keys → tick of their most recent key-down (auto-repeat refreshes it, so a
+    // genuinely-held key stays fresh while a key whose key-up was lost ages out).
+    private readonly Dictionary<int, long> _pressedKeys = new();          // modifiers
+    private readonly Dictionary<int, long> _pressedNonModifiers = new();  // ordinary keys
     private readonly Func<long> _ticks;
-    private long _lastEventTicks;
 
     private bool _chordActive;        // a chord is currently being built
     private bool _cancelled;          // a foreign non-modifier key broke the chord
@@ -86,7 +87,8 @@ public sealed class LayoutHotkeyGestureDetector
     /// <summary>Feed a key-down event (from the low-level hook or a test).</summary>
     public void OnKeyDown(int vk)
     {
-        ExpireStaleState();
+        var now = _ticks();
+        PurgeStale(now);
 
         var kind = KindOf(vk);
         if (kind is not null)
@@ -104,8 +106,8 @@ public sealed class LayoutHotkeyGestureDetector
                 _altShiftTogether = false;
             }
 
-            // HashSet.Add is a no-op for auto-repeat of an already-held key.
-            _pressedKeys.Add(vk);
+            // Add or refresh (auto-repeat keeps a genuinely-held key fresh).
+            _pressedKeys[vk] = now;
             _union |= kind.Value;
 
             var held = HeldKinds();
@@ -123,7 +125,7 @@ public sealed class LayoutHotkeyGestureDetector
         }
 
         // Track ordinary keys so a chord starting while one is held is rejected.
-        _pressedNonModifiers.Add(vk);
+        _pressedNonModifiers[vk] = now;
 
         if (!_chordActive)
         {
@@ -150,7 +152,7 @@ public sealed class LayoutHotkeyGestureDetector
     /// <summary>Feed a key-up event (from the low-level hook or a test).</summary>
     public void OnKeyUp(int vk)
     {
-        ExpireStaleState();
+        PurgeStale(_ticks());
 
         if (KindOf(vk) is null)
         {
@@ -172,12 +174,7 @@ public sealed class LayoutHotkeyGestureDetector
         var ctrlShift = _ctrlShiftTogether;
         var altShift = _altShiftTogether;
 
-        _chordActive = false;
-        _cancelled = false;
-        _spaceSeen = false;
-        _union = Mods.None;
-        _ctrlShiftTogether = false;
-        _altShiftTogether = false;
+        ClearChordState();
 
         if (cancelled)
         {
@@ -208,21 +205,58 @@ public sealed class LayoutHotkeyGestureDetector
     }
 
     /// <summary>
-    /// Discard tracked state that is older than <see cref="StaleChordTimeoutMs"/>.
-    /// A key-up lost to the secure desktop (UAC) or a session switch — for either a
-    /// modifier <b>or</b> an ordinary key — would otherwise leave that key virtually
-    /// held: a stuck ordinary key poisons every future chord (starts it cancelled).
+    /// Drop any individual key held longer than <see cref="StaleChordTimeoutMs"/>
+    /// without a refresh — its key-up was lost (secure desktop / session switch).
+    /// Ageing is <b>per key</b>, not since the last global event, so a key stuck by a
+    /// lost key-up still expires even while the user keeps typing other keys (which
+    /// would otherwise keep a global timer perpetually fresh and poison every future
+    /// chord). A genuinely-held key auto-repeats, refreshing its timestamp.
     /// </summary>
-    private void ExpireStaleState()
+    private void PurgeStale(long now)
     {
-        var now = _ticks();
-        var hasState = _pressedKeys.Count > 0 || _pressedNonModifiers.Count > 0;
-        if (hasState && now - _lastEventTicks > StaleChordTimeoutMs)
+        RemoveExpired(_pressedKeys, now);
+        RemoveExpired(_pressedNonModifiers, now);
+
+        // If the active chord lost all of its modifiers to expiry, drop it silently.
+        if (_chordActive && _pressedKeys.Count == 0)
         {
-            Reset();
+            ClearChordState();
+        }
+    }
+
+    private static void RemoveExpired(Dictionary<int, long> held, long now)
+    {
+        if (held.Count == 0)
+        {
+            return;
         }
 
-        _lastEventTicks = now;
+        List<int>? stale = null;
+        foreach (var kv in held)
+        {
+            if (now - kv.Value > StaleChordTimeoutMs)
+            {
+                (stale ??= new List<int>()).Add(kv.Key);
+            }
+        }
+
+        if (stale is not null)
+        {
+            foreach (var vk in stale)
+            {
+                held.Remove(vk);
+            }
+        }
+    }
+
+    private void ClearChordState()
+    {
+        _chordActive = false;
+        _cancelled = false;
+        _spaceSeen = false;
+        _union = Mods.None;
+        _ctrlShiftTogether = false;
+        _altShiftTogether = false;
     }
 
     /// <summary>
@@ -233,18 +267,13 @@ public sealed class LayoutHotkeyGestureDetector
     {
         _pressedKeys.Clear();
         _pressedNonModifiers.Clear();
-        _chordActive = false;
-        _cancelled = false;
-        _spaceSeen = false;
-        _union = Mods.None;
-        _ctrlShiftTogether = false;
-        _altShiftTogether = false;
+        ClearChordState();
     }
 
     private Mods HeldKinds()
     {
         var held = Mods.None;
-        foreach (var vk in _pressedKeys)
+        foreach (var vk in _pressedKeys.Keys)
         {
             if (KindOf(vk) is { } kind)
             {
