@@ -323,14 +323,18 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     // Runs on the UI thread — Win32 positioning and the DPI probe are safe here.
-    // CapsLock is read via GetKeyState: on this message-pumping, hook-owning thread it
-    // reliably reflects the global toggle state (verified empirically), and the gesture
-    // that triggered this was just processed by our hook, so the state is fresh.
+    // CapsLock is read via GetKeyState: empirically, on the message-pumping thread that
+    // owns the WH_KEYBOARD_LL hook, it reflects the global toggle state (this is stable
+    // Windows 10/11 behaviour, not a documented contract), and the gesture that
+    // triggered this was just processed by our hook, so the state is fresh.
     private void ShowOnUi(int id, ProbeResult probe, bool isSecond)
     {
-        if (_disposed || id != _requestId || !_settings.Enabled)
+        // Also re-check the foreground window: the user may have switched apps between
+        // the probe and this deferred show, in which case the caret/layout are stale.
+        if (_disposed || id != _requestId || !_settings.Enabled ||
+            GetForegroundWindow() != probe.Hwnd)
         {
-            return; // stale request or disabled
+            return; // stale request, disabled, or foreground changed
         }
 
         var text = InputLanguageService.ComposeDisplayText(probe.Code, IsCapsLockOn());

@@ -227,6 +227,11 @@ Criteria **1, 6, 7, 8, 9, 13** are best confirmed by using the app live: switch 
 with `Ctrl+Shift` in Notepad / a browser / VS Code, on single- and multi-monitor setups at
 100 %/125 %/150 %/200 % scaling, and observe focus, placement, and idle CPU.
 
+Also worth a quick per-release smoke test, since they depend on runtime OS behaviour that
+unit tests cannot cover: **CapsLock** — toggle it in a browser/editor and confirm the
+`CAPS` suffix matches; caret coverage in **Chromium/Electron, Telegram/Qt, consoles, and
+UWP**; and layout switching via the non-default hotkey (`Alt+Shift` / `Win+Space`).
+
 ---
 
 ## Acknowledgements
