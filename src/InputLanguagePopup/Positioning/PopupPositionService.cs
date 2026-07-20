@@ -37,19 +37,28 @@ public sealed class PopupPositionService
         _settings.CursorOffsetX, _settings.CursorOffsetY);
 
     /// <summary>
-    /// Compute placement for the given caret result. <paramref name="logicalSize"/>
-    /// is the popup size at 96 DPI; the returned size is scaled to the target
-    /// monitor's DPI. <paramref name="foregroundWindow"/> is used to obtain the DPI
-    /// for caret sources via <c>GetDpiForWindow</c> (the API recommended for
-    /// Per-Monitor-V2 processes); pass <see cref="IntPtr.Zero"/> when unknown.
+    /// The screen point used to choose the target monitor and to read its DPI: the
+    /// caret's bottom-right (stepped one pixel inside the exclusive rect) or the
+    /// cursor position. The caller reads the DPI at this point from the Per-Monitor-V2
+    /// popup window, then passes the scale to <see cref="Compute"/>.
     /// </summary>
-    public PopupPlacement Compute(CaretResult caret, Size logicalSize, IntPtr foregroundWindow)
+    public static Point GetAnchorPoint(CaretResult caret)
+    {
+        var p = ReferencePoint(caret);
+        return new Point(p.X, p.Y);
+    }
+
+    /// <summary>
+    /// Compute placement for the given caret result. <paramref name="logicalSize"/>
+    /// is the popup size at 96 DPI; the returned size is scaled by
+    /// <paramref name="dpiScale"/> (obtained from the popup window's own monitor, so
+    /// it is correct regardless of the foreground app's DPI awareness).
+    /// </summary>
+    public PopupPlacement Compute(CaretResult caret, Size logicalSize, double dpiScale)
     {
         var reference = ReferencePoint(caret);
         var hMonitor = MonitorFromPoint(reference, MONITOR_DEFAULTTONEAREST);
-
         var workArea = GetWorkArea(hMonitor);
-        var dpiScale = GetDpiScale(caret, foregroundWindow, hMonitor);
 
         var size = new Size(
             Math.Max(1, (int)Math.Round(logicalSize.Width * dpiScale)),
@@ -153,27 +162,4 @@ public sealed class PopupPositionService
         return new Rectangle(0, 0, 1920, 1080); // reasonable fallback
     }
 
-    private static double GetDpiScale(CaretResult caret, IntPtr foregroundWindow, IntPtr hMonitor)
-    {
-        // For caret sources prefer GetDpiForWindow on the foreground window — the
-        // API Microsoft recommends for Per-Monitor-V2 processes (GetDpiForMonitor is
-        // documented as not DPI-aware). Fall back to the monitor DPI otherwise.
-        if (caret.Source != CaretSource.CursorFallback && foregroundWindow != IntPtr.Zero)
-        {
-            var dpi = GetDpiForWindow(foregroundWindow);
-            if (dpi > 0)
-            {
-                return dpi / 96.0;
-            }
-        }
-
-        if (hMonitor != IntPtr.Zero &&
-            GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, out var dpiX, out _) == 0 &&
-            dpiX > 0)
-        {
-            return dpiX / 96.0;
-        }
-
-        return 1.0;
-    }
 }

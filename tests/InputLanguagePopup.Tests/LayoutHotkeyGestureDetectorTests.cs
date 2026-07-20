@@ -502,6 +502,45 @@ public class LayoutHotkeyGestureDetectorTests
         Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);
     }
 
+    [Fact] // A lost key-up for an ordinary key must not poison future chords forever
+    public void StaleNonModifier_AfterLostKeyUp_DoesNotPoisonFutureChords()
+    {
+        long now = 0;
+        var d = new LayoutHotkeyGestureDetector(() => now);
+        var fired = new List<LayoutGesture>();
+        d.GestureRecognized += g => fired.Add(g);
+
+        d.OnKeyDown(VK_S); // key-up lost (e.g. secure desktop)
+
+        // Long after, a fresh clean chord must still fire — the stale ordinary key
+        // is expired first.
+        now = LayoutHotkeyGestureDetector.StaleChordTimeoutMs + 1;
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyDown(VK_LSHIFT);
+        d.OnKeyUp(VK_LSHIFT);
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);
+    }
+
+    [Fact] // A recently-held ordinary key (within the timeout) still cancels
+    public void RecentNonModifier_WithinTimeout_StillCancels()
+    {
+        long now = 0;
+        var d = new LayoutHotkeyGestureDetector(() => now);
+        var fired = new List<LayoutGesture>();
+        d.GestureRecognized += g => fired.Add(g);
+
+        d.OnKeyDown(VK_S);
+        now = LayoutHotkeyGestureDetector.StaleChordTimeoutMs - 1; // not yet stale
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyDown(VK_LSHIFT);
+        d.OnKeyUp(VK_LSHIFT);
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Empty(fired);
+    }
+
     [Fact]
     public void SlowChord_WithGapsUnderTimeout_StillFires()
     {

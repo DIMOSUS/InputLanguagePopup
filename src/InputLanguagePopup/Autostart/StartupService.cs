@@ -37,7 +37,13 @@ public sealed class StartupService
         }
     }
 
-    public void SetEnabled(bool enabled)
+    /// <summary>
+    /// Register or remove the autostart entry. Returns <c>true</c> if the registry
+    /// now reflects the requested state, <c>false</c> if the operation could not be
+    /// completed (e.g. running under the dotnet host, or a registry error) — the
+    /// caller should not persist an "enabled" setting on a <c>false</c> result.
+    /// </summary>
+    public bool SetEnabled(bool enabled)
     {
         try
         {
@@ -46,7 +52,7 @@ public sealed class StartupService
             if (key is null)
             {
                 _logger.Warn("Could not open the Run registry key.");
-                return;
+                return false;
             }
 
             if (enabled)
@@ -54,31 +60,35 @@ public sealed class StartupService
                 var command = GetExpectedCommand();
                 if (command is null)
                 {
-                    return; // reason already logged
+                    return false; // reason already logged
                 }
 
                 // Only write when the value is missing or points somewhere else —
                 // this repairs a stale path left behind after moving a portable exe.
                 var existing = key.GetValue(ValueName) as string;
-                if (string.Equals(existing, command, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(existing, command, StringComparison.OrdinalIgnoreCase))
                 {
-                    return;
+                    key.SetValue(ValueName, command);
+                    _logger.Info(existing is null
+                        ? "Autostart entry created."
+                        : "Autostart entry updated to the current executable path.");
                 }
 
-                key.SetValue(ValueName, command);
-                _logger.Info(existing is null
-                    ? "Autostart entry created."
-                    : "Autostart entry updated to the current executable path.");
+                return true;
             }
-            else if (key.GetValue(ValueName) is not null)
+
+            if (key.GetValue(ValueName) is not null)
             {
                 key.DeleteValue(ValueName, throwOnMissingValue: false);
                 _logger.Info("Autostart entry removed.");
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger.Error("Failed to update startup registry value.", ex);
+            return false;
         }
     }
 

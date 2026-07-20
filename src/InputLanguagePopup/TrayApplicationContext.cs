@@ -63,7 +63,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _languageService = new InputLanguageService(logger);
         _caretLocator = new CaretLocator(logger, settings);
         _positionService = new PopupPositionService(settings);
-        _popupForm = new LanguagePopupForm();
+        _popupForm = new LanguagePopupForm(logger);
 
         _detector = new LayoutHotkeyGestureDetector();
         _detector.GestureRecognized += OnGestureRecognized;
@@ -331,7 +331,8 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         var text = InputLanguageService.ComposeDisplayText(probe.Code, IsCapsLockOn());
         var logicalSize = LanguagePopupForm.MeasureLogicalSize(text);
-        var placement = _positionService.Compute(probe.Caret, logicalSize, probe.Hwnd);
+        var dpiScale = _popupForm.GetDpiScaleForPoint(PopupPositionService.GetAnchorPoint(probe.Caret));
+        var placement = _positionService.Compute(probe.Caret, logicalSize, dpiScale);
 
         // On the second check, avoid re-showing (and restarting the timer) if
         // nothing changed since the first check.
@@ -376,8 +377,24 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OnToggleStartup(object? sender, EventArgs e)
     {
-        _settings.StartWithWindows = _startupItem.Checked;
-        _startupService.SetEnabled(_settings.StartWithWindows);
+        var desired = _startupItem.Checked;
+
+        if (_startupService.SetEnabled(desired))
+        {
+            _settings.StartWithWindows = desired;
+        }
+        else
+        {
+            // The registry could not be updated (e.g. dev run under dotnet host).
+            // Reflect the real state instead of claiming success.
+            var actual = _startupService.IsEnabled();
+            _startupItem.Checked = actual;
+            _settings.StartWithWindows = actual;
+            MessageBox.Show(
+                "Could not update the \"Start with Windows\" setting. See the log for details.",
+                "Input Language Popup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
         _settingsService.Save(_settings);
     }
 
@@ -395,7 +412,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
 
             var caret = new CaretResult(CaretSource.CursorFallback, new Rectangle(pt.X, pt.Y, 0, 0));
-            var placement = _positionService.Compute(caret, LanguagePopupForm.MeasureLogicalSize(text), IntPtr.Zero);
+            var dpiScale = _popupForm.GetDpiScaleForPoint(PopupPositionService.GetAnchorPoint(caret));
+            var placement = _positionService.Compute(caret, LanguagePopupForm.MeasureLogicalSize(text), dpiScale);
             _popupForm.ShowPopup(text, placement, _settings.PopupDurationMs);
         }
         catch (Exception ex)

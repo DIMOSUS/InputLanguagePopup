@@ -2,7 +2,9 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using InputLanguagePopup.Diagnostics;
 using InputLanguagePopup.Positioning;
 using static InputLanguagePopup.Interop.NativeMethods;
 
@@ -51,8 +53,11 @@ public sealed class LanguagePopupForm : Form
     private const int FadeSteps = 6;
     private const int FadeIntervalMs = 22;
 
-    public LanguagePopupForm()
+    private readonly Logger _logger;
+
+    public LanguagePopupForm(Logger logger)
     {
+        _logger = logger;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -79,6 +84,25 @@ public sealed class LanguagePopupForm : Form
                           WS_EX_TOPMOST | WS_EX_TRANSPARENT;
             return cp;
         }
+    }
+
+    /// <summary>
+    /// The DPI scale (1.0 = 96 DPI) of the monitor containing <paramref name="anchor"/>,
+    /// read from this popup's own window. The popup is Per-Monitor-V2 aware, so unlike
+    /// <c>GetDpiForWindow</c> on a foreign (possibly DPI-unaware or system-aware) app
+    /// window, this always returns the target monitor's true effective DPI. The window
+    /// is moved while still hidden, so there is no flicker. Must be called on the UI
+    /// thread, before <see cref="ShowPopup"/>.
+    /// </summary>
+    public double GetDpiScaleForPoint(Point anchor)
+    {
+        // Park the (hidden) window on the anchor's monitor so GetDpiForWindow reports
+        // that monitor. No SWP_SHOWWINDOW → it stays hidden; ShowPopup repositions it.
+        SetWindowPos(Handle, IntPtr.Zero, anchor.X, anchor.Y, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+        var dpi = GetDpiForWindow(Handle);
+        return dpi > 0 ? dpi / 96.0 : 1.0;
     }
 
     /// <summary>
@@ -211,7 +235,20 @@ public sealed class LanguagePopupForm : Form
     private void ApplyBitmap(Bitmap bmp, Point location, Size size, byte constAlpha)
     {
         var screenDc = GetDC(IntPtr.Zero);
+        if (screenDc == IntPtr.Zero)
+        {
+            _logger.Warn("GetDC failed; the popup could not be drawn.");
+            return;
+        }
+
         var memDc = CreateCompatibleDC(screenDc);
+        if (memDc == IntPtr.Zero)
+        {
+            _logger.Warn("CreateCompatibleDC failed; the popup could not be drawn.");
+            ReleaseDC(IntPtr.Zero, screenDc);
+            return;
+        }
+
         var hBitmap = IntPtr.Zero;
         var oldBitmap = IntPtr.Zero;
 
@@ -232,8 +269,11 @@ public sealed class LanguagePopupForm : Form
                 AlphaFormat = AC_SRC_ALPHA,
             };
 
-            UpdateLayeredWindow(Handle, screenDc, ref dstPoint, ref srcSize,
-                memDc, ref srcPoint, 0, ref blend, ULW_ALPHA);
+            if (!UpdateLayeredWindow(Handle, screenDc, ref dstPoint, ref srcSize,
+                    memDc, ref srcPoint, 0, ref blend, ULW_ALPHA))
+            {
+                _logger.Warn($"UpdateLayeredWindow failed. Win32 error {Marshal.GetLastWin32Error()}.");
+            }
         }
         finally
         {

@@ -100,11 +100,12 @@ The process is **Per-Monitor V2** DPI aware (declared in `app.manifest`, mirrore
 monitor's last column/row does not pick the neighbour), reads its work area
 (`GetMonitorInfo`), scales the popup size and offsets, and clamps the result to that
 monitor's work area — correctly handling monitors placed left of / above the primary
-(negative coordinates). DPI for caret sources comes from `GetDpiForWindow` on the
-foreground window (the API Microsoft recommends for Per-Monitor-V2 processes), falling
-back to `GetDpiForMonitor` for the cursor case. The pure geometry lives in
-`ComputeLocation` and is covered by unit tests (mixed DPI, edge flips, negative-origin
-monitors).
+(negative coordinates). The DPI scale is read from the **popup's own** Per-Monitor-V2
+window (park it, still hidden, on the anchor's monitor, then `GetDpiForWindow` on our
+handle). This gives the target monitor's true effective DPI regardless of the foreground
+app's DPI awareness — `GetDpiForWindow` on a foreign (DPI-unaware or system-aware) window
+would report the wrong value. The pure geometry lives in `ComputeLocation` and is covered
+by unit tests (mixed DPI, edge flips, negative-origin monitors).
 
 ## The popup window
 
@@ -141,9 +142,9 @@ instance is created once at startup and reused for every show.
 
 **Mouse fallback** (`user32`) `GetCursorPos`.
 
-**Monitors / DPI** (`user32`, `shcore`)
-`MonitorFromPoint`, `MonitorFromWindow`, `GetMonitorInfo` (`MONITORINFO`, `rcWork`),
-`GetDpiForMonitor`, `GetDpiForWindow`.
+**Monitors / DPI** (`user32`)
+`MonitorFromPoint`, `GetMonitorInfo` (`MONITORINFO`, `rcWork`), `GetDpiForWindow` (on the
+popup's own Per-Monitor-V2 window).
 
 **Layered popup** (`user32`, `gdi32`)
 `UpdateLayeredWindow` (`BLENDFUNCTION`, `AC_SRC_ALPHA`, `ULW_ALPHA`), `SetWindowPos`
@@ -194,10 +195,11 @@ desktop session (recommended check for the user).
 
 * Solution builds with **0 warnings / 0 errors** (Debug and Release), CI green on
   `windows-latest`.
-* **55 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
-  cancellation incl. a key held *before* the chord, auto-repeat, staleness), system-hotkey
-  interpretation, popup positioning (mixed DPI, edge flips, negative-origin monitors),
-  settings normalization, and the CapsLock text composition.
+* **57 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
+  cancellation incl. a key held *before* the chord, auto-repeat, and staleness for both
+  modifiers and ordinary keys), system-hotkey interpretation, popup positioning (mixed
+  DPI, edge flips, negative-origin monitors), settings normalization, and the CapsLock
+  text composition.
 * The **MSAA** (`accLocation`, vtable slot 22) and updated **UI Automation** interop were
   validated end-to-end against a focused control (real caret coordinates, no access
   violation).

@@ -209,13 +209,15 @@ public sealed class LayoutHotkeyGestureDetector
 
     /// <summary>
     /// Discard tracked state that is older than <see cref="StaleChordTimeoutMs"/>.
-    /// Key-ups lost to the secure desktop (UAC) or session switches would
-    /// otherwise leave modifiers virtually held indefinitely.
+    /// A key-up lost to the secure desktop (UAC) or a session switch — for either a
+    /// modifier <b>or</b> an ordinary key — would otherwise leave that key virtually
+    /// held: a stuck ordinary key poisons every future chord (starts it cancelled).
     /// </summary>
     private void ExpireStaleState()
     {
         var now = _ticks();
-        if (_pressedKeys.Count > 0 && now - _lastEventTicks > StaleChordTimeoutMs)
+        var hasState = _pressedKeys.Count > 0 || _pressedNonModifiers.Count > 0;
+        if (hasState && now - _lastEventTicks > StaleChordTimeoutMs)
         {
             Reset();
         }
