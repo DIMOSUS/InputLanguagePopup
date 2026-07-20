@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace InputLanguagePopup.Interop;
 
@@ -17,6 +18,7 @@ internal static class NativeMethods
     public const int VK_RSHIFT = 0xA1;
     public const int VK_LCONTROL = 0xA2;
     public const int VK_RCONTROL = 0xA3;
+    public const int VK_CAPITAL = 0x14; // CapsLock
 
     // ---- Low level keyboard hook ----------------------------------------
     public const int WH_KEYBOARD_LL = 13;
@@ -61,6 +63,28 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetKeyboardLayout(uint idThread);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetClassNameNative(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    /// <summary>Window class name, or an empty string on failure.</summary>
+    public static string GetClassName(IntPtr hWnd)
+    {
+        var sb = new StringBuilder(256);
+        var len = GetClassNameNative(hWnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString() : string.Empty;
+    }
+
+    // Console windows do not carry the layout on their own thread; the IME window does.
+    [DllImport("imm32.dll")]
+    public static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
+
+    // Toggle state of CapsLock is in the low-order bit. Read on a thread that
+    // processes keyboard input (our UI thread) so it is not stale.
+    [DllImport("user32.dll")]
+    public static extern short GetKeyState(int nVirtKey);
+
+    public static bool IsCapsLockOn() => (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
 
     // ---- Caret / GUI thread info ----------------------------------------
     [StructLayout(LayoutKind.Sequential)]

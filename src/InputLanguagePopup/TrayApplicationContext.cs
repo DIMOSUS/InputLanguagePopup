@@ -43,12 +43,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     private volatile int _requestId;
     private CancellationTokenSource? _cts;
     private int _lastShownRequestId = -1;
-    private string? _lastShownCode;
+    private string? _lastShownText;
     private PopupPlacement _lastPlacement;
 
     private bool _disposed;
 
-    private readonly record struct ProbeResult(string Code, PopupPlacement Placement);
+    // Detection result. Presentation (CapsLock text, size, placement) is computed
+    // later on the UI thread, so the popup can size itself to the final text.
+    private readonly record struct ProbeResult(string Code, CaretResult Caret, IntPtr Hwnd);
 
     public TrayApplicationContext(Logger logger, SettingsService settingsService, AppSettings settings)
     {
@@ -315,11 +317,11 @@ public sealed class TrayApplicationContext : ApplicationContext
             return null;
         }
 
-        var placement = _positionService.Compute(caret, LanguagePopupForm.LogicalSize, hwnd);
-        return new ProbeResult(code, placement);
+        return new ProbeResult(code, caret, hwnd);
     }
 
-    // Runs on the UI thread.
+    // Runs on the UI thread — which processes keyboard input, so CapsLock reads
+    // fresh, and Win32 positioning calls are safe here.
     private void ShowOnUi(int id, ProbeResult probe, bool isSecond)
     {
         if (_disposed || id != _requestId || !_settings.Enabled)
@@ -327,20 +329,24 @@ public sealed class TrayApplicationContext : ApplicationContext
             return; // stale request or disabled
         }
 
+        var text = InputLanguageService.ComposeDisplayText(probe.Code, IsCapsLockOn());
+        var logicalSize = LanguagePopupForm.MeasureLogicalSize(text);
+        var placement = _positionService.Compute(probe.Caret, logicalSize, probe.Hwnd);
+
         // On the second check, avoid re-showing (and restarting the timer) if
         // nothing changed since the first check.
         if (isSecond &&
             _lastShownRequestId == id &&
-            _lastShownCode == probe.Code &&
-            _lastPlacement.Equals(probe.Placement))
+            _lastShownText == text &&
+            _lastPlacement.Equals(placement))
         {
             return;
         }
 
-        _popupForm.ShowPopup(probe.Code, probe.Placement, _settings.PopupDurationMs);
+        _popupForm.ShowPopup(text, placement, _settings.PopupDurationMs);
         _lastShownRequestId = id;
-        _lastShownCode = probe.Code;
-        _lastPlacement = probe.Placement;
+        _lastShownText = text;
+        _lastPlacement = placement;
     }
 
     // ---- Tray menu handlers ---------------------------------------------
@@ -381,6 +387,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             var hkl = _languageService.GetForegroundLayout(out _);
             var code = _languageService.GetDisplayCode(hkl) ?? "EN";
+            var text = InputLanguageService.ComposeDisplayText(code, IsCapsLockOn());
 
             if (!GetCursorPos(out var pt))
             {
@@ -388,8 +395,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
 
             var caret = new CaretResult(CaretSource.CursorFallback, new Rectangle(pt.X, pt.Y, 0, 0));
-            var placement = _positionService.Compute(caret, LanguagePopupForm.LogicalSize, IntPtr.Zero);
-            _popupForm.ShowPopup(code, placement, _settings.PopupDurationMs);
+            var placement = _positionService.Compute(caret, LanguagePopupForm.MeasureLogicalSize(text), IntPtr.Zero);
+            _popupForm.ShowPopup(text, placement, _settings.PopupDurationMs);
         }
         catch (Exception ex)
         {

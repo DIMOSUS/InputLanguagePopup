@@ -15,8 +15,29 @@ namespace InputLanguagePopup.Ui;
 /// </summary>
 public sealed class LanguagePopupForm : Form
 {
-    /// <summary>Popup size at 96 DPI (physical size is scaled per monitor).</summary>
+    /// <summary>Base popup size at 96 DPI — the minimum; width grows with the text.</summary>
     public static readonly Size LogicalSize = new(44, 32);
+
+    private const int LogicalHeight = 32;
+    private const int LogicalHorizontalPadding = 12; // per side, at 96 DPI
+
+    /// <summary>
+    /// The logical (96-DPI) size needed to render <paramref name="text"/>: fixed
+    /// height, width grown from the measured text so codes like "EN CAPS" fit. The
+    /// physical size is derived from this by <c>PopupPositionService</c>.
+    /// </summary>
+    public static Size MeasureLogicalSize(string text)
+    {
+        var em = Math.Max(9f, LogicalHeight * 0.52f);
+        using var font = CreateFont(em);
+        using var bmp = new Bitmap(1, 1);
+        using var g = Graphics.FromImage(bmp);
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+
+        var textWidth = g.MeasureString(text, font).Width;
+        var width = Math.Max(LogicalSize.Width, (int)Math.Ceiling(textWidth) + 2 * LogicalHorizontalPadding);
+        return new Size(width, LogicalHeight);
+    }
 
     private readonly System.Windows.Forms.Timer _hideTimer = new();
     private readonly System.Windows.Forms.Timer _fadeTimer = new();

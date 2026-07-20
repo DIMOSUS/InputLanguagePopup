@@ -1,4 +1,6 @@
+using System;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using InputLanguagePopup.Diagnostics;
 using InputLanguagePopup.Interop;
 using static InputLanguagePopup.Interop.NativeMethods;
@@ -38,7 +40,11 @@ public sealed class InputLanguageService
             return IntPtr.Zero;
         }
 
-        var threadId = GetWindowThreadProcessId(foregroundWindow, out _);
+        // Consoles and UWP/host windows do not carry the layout on the foreground
+        // window's own thread; resolve the window that actually owns the input.
+        var layoutWindow = ResolveLayoutWindow(foregroundWindow);
+
+        var threadId = GetWindowThreadProcessId(layoutWindow, out _);
         if (threadId == 0)
         {
             _logger.Warn("GetWindowThreadProcessId returned 0.");
@@ -49,6 +55,45 @@ public sealed class InputLanguageService
         // our own thread's layout instead of the target application's.
         return GetKeyboardLayout(threadId);
     }
+
+    /// <summary>
+    /// Pick the window whose thread actually owns the keyboard layout: for consoles
+    /// (CMD/PowerShell) the default IME window; for UWP hosts / Steam popups the
+    /// focused child control; otherwise the foreground window itself.
+    /// </summary>
+    private IntPtr ResolveLayoutWindow(IntPtr foregroundWindow)
+    {
+        var className = GetClassName(foregroundWindow);
+
+        if (className == "ConsoleWindowClass")
+        {
+            var ime = ImmGetDefaultIMEWnd(foregroundWindow);
+            if (ime != IntPtr.Zero)
+            {
+                return ime;
+            }
+        }
+        else if (className is "ApplicationFrameWindow" or "vguiPopupWindow")
+        {
+            // The real input lives in a focused child; GUITHREADINFO.hwndFocus of the
+            // foreground thread points at it.
+            var tid = GetWindowThreadProcessId(foregroundWindow, out _);
+            if (tid != 0)
+            {
+                var gti = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+                if (GetGUIThreadInfo(tid, ref gti) && gti.hwndFocus != IntPtr.Zero)
+                {
+                    return gti.hwndFocus;
+                }
+            }
+        }
+
+        return foregroundWindow;
+    }
+
+    /// <summary>Build the popup text: the layout code, plus " CAPS" when CapsLock is on.</summary>
+    public static string ComposeDisplayText(string code, bool capsLockOn)
+        => capsLockOn ? code + " CAPS" : code;
 
     /// <summary>
     /// Convert an HKL into a short uppercase display code, or <c>null</c> if it

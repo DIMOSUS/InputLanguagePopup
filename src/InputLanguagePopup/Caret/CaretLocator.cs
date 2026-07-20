@@ -7,13 +7,14 @@ using static InputLanguagePopup.Interop.NativeMethods;
 namespace InputLanguagePopup.Caret;
 
 /// <summary>
-/// Cascades the caret-location strategies: system caret → UI Automation →
+/// Cascades the caret-location strategies: system caret → MSAA → UI Automation →
 /// cursor fallback. Returns the screen position and the source that produced it.
 /// </summary>
 public sealed class CaretLocator : IDisposable
 {
     private readonly Logger _logger;
     private readonly Win32CaretLocator _win32;
+    private readonly MsaaCaretLocator _msaa;
     private readonly UiAutomationCaretLocator _uiAutomation;
     private readonly CursorFallbackLocator _cursor;
     private readonly AppSettings _settings;
@@ -23,6 +24,7 @@ public sealed class CaretLocator : IDisposable
         _logger = logger;
         _settings = settings;
         _win32 = new Win32CaretLocator(logger);
+        _msaa = new MsaaCaretLocator(logger);
         _uiAutomation = new UiAutomationCaretLocator(logger);
         _cursor = new CursorFallbackLocator();
     }
@@ -37,39 +39,68 @@ public sealed class CaretLocator : IDisposable
             ? 0u
             : GetWindowThreadProcessId(foregroundWindow, out _);
 
-        var result = _win32.TryLocate(foregroundWindow, threadId);
-        if (result.IsValid)
-        {
-            if (IsOnScreen(result.Bounds))
-            {
-                return result;
-            }
+        var className = foregroundWindow == IntPtr.Zero ? string.Empty : GetClassName(foregroundWindow);
 
-            _logger.Warn($"Win32 caret rectangle {result.Bounds} is outside the virtual screen; trying next strategy.");
+        // Some toolkits report a bogus system caret. Telegram / other Qt windows
+        // (class like "Qt51515QWindowIcon") give a wrong GetGUIThreadInfo caret, so
+        // skip the Win32 strategy for them and rely on MSAA / UI Automation.
+        if (!IsUnreliableWin32Caret(className))
+        {
+            var win32 = _win32.TryLocate(foregroundWindow, threadId);
+            if (TryAccept(win32, "Win32", out var accepted))
+            {
+                return accepted;
+            }
+        }
+
+        var msaa = _msaa.TryLocate(foregroundWindow, threadId);
+        if (TryAccept(msaa, "MSAA", out var msaaAccepted))
+        {
+            return msaaAccepted;
         }
 
         if (_settings.UseUiAutomation)
         {
-            result = _uiAutomation.TryLocate(foregroundWindow, threadId);
-            if (result.IsValid)
+            var uia = _uiAutomation.TryLocate(foregroundWindow, threadId);
+            if (TryAccept(uia, "UI Automation", out var uiaAccepted))
             {
-                if (IsOnScreen(result.Bounds))
-                {
-                    return result;
-                }
-
-                _logger.Warn($"UI Automation caret rectangle {result.Bounds} is outside the virtual screen; trying next strategy.");
+                return uiaAccepted;
             }
         }
 
-        result = _cursor.TryLocate(foregroundWindow, threadId);
-        if (!result.IsValid)
+        var cursor = _cursor.TryLocate(foregroundWindow, threadId);
+        if (!cursor.IsValid)
         {
             _logger.Warn("All caret strategies failed, including cursor fallback.");
         }
 
-        return result;
+        return cursor;
     }
+
+    private bool TryAccept(CaretResult result, string strategy, out CaretResult accepted)
+    {
+        accepted = result;
+        if (!result.IsValid)
+        {
+            return false;
+        }
+
+        if (IsOnScreen(result.Bounds))
+        {
+            return true;
+        }
+
+        _logger.Warn($"{strategy} caret rectangle {result.Bounds} is outside the virtual screen; trying next strategy.");
+        return false;
+    }
+
+    /// <summary>
+    /// True for window classes whose system (GetGUIThreadInfo) caret is known to be
+    /// unreliable — currently Qt windows (Telegram Desktop and similar).
+    /// </summary>
+    private static bool IsUnreliableWin32Caret(string className)
+        => className.StartsWith("Qt", StringComparison.Ordinal) &&
+           className.Contains("QWindowIcon", StringComparison.Ordinal);
 
     /// <summary>
     /// A caret rectangle is only trusted if it actually lies on some monitor

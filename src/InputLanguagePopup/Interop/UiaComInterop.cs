@@ -98,12 +98,15 @@ internal interface IUIAutomationTextPattern2
 [Guid("A543CC6A-F4AE-494B-8239-C814481187A8")]
 internal interface IUIAutomationTextRange
 {
-    // Slots 0-6: Clone, Compare, CompareEndpoints, ExpandToEnclosingUnit,
-    //            FindAttribute, FindText, GetAttributeValue.
+    // Slots 0-2: Clone, Compare, CompareEndpoints.
     [PreserveSig] int _slot00();
     [PreserveSig] int _slot01();
     [PreserveSig] int _slot02();
-    [PreserveSig] int _slot03();
+
+    // Slot 3: ExpandToEnclosingUnit(TextUnit). TextUnit_Character = 0.
+    [PreserveSig] int ExpandToEnclosingUnit(int textUnit);
+
+    // Slots 4-6: FindAttribute, FindText, GetAttributeValue.
     [PreserveSig] int _slot04();
     [PreserveSig] int _slot05();
     [PreserveSig] int _slot06();

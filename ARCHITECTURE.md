@@ -39,17 +39,18 @@ layered popup near the caret (or the mouse cursor).
 | `GlobalKeyboardHook` | Installs/removes `WH_KEYBOARD_LL`; converts native events into `KeyDown`/`KeyUp`. **Never suppresses** keys; no business logic. |
 | `LayoutHotkeyGestureDetector` | Pure, Win32-independent state machine that recognises the layout-switch gestures: clean `Ctrl+Shift` / `Alt+Shift` chords and `Win+Space` (incl. `Win+Shift+Space`). Reports *which* gesture completed; auto-discards state older than 10 s. Fully unit-tested. |
 | `SystemHotkeyService` | Reads `HKCU\Keyboard Layout\Toggle` (per completed gesture, off the hot path) to decide which chord actually switches layouts on this system — settings changes apply without restart. |
-| `InputLanguageService` | Foreground window → thread id → `GetKeyboardLayout`; converts the HKL to a display code (`RU`/`EN`/`LT`/ISO). |
+| `InputLanguageService` | Foreground window → thread id → `GetKeyboardLayout`; converts the HKL to a display code (`RU`/`EN`/`LT`/ISO). Resolves the layout-owning window for consoles (`ImmGetDefaultIMEWnd`) and UWP/Steam hosts (focus child). Composes the popup text, appending `CAPS` when CapsLock is on. |
 | `CaretLocator` | Cascades the three position strategies and returns a screen rectangle + its source. |
-| `Win32CaretLocator` | Strategy 1 — system caret via `GetGUIThreadInfo` + `ClientToScreen`. |
-| `UiAutomationCaretLocator` | Strategy 2 — COM UI Automation `TextPattern2.GetCaretRange`, on a dedicated MTA worker thread. Single-flight (one request at a time), per-call timeout and a post-timeout cooldown so a hung provider degrades to the cursor instead of piling up work. Honours the caret's `isActive` flag. |
-| `CursorFallbackLocator` | Strategy 3 — mouse cursor via `GetCursorPos`. |
+| `Win32CaretLocator` | Strategy 1 — system caret via `GetGUIThreadInfo` + `ClientToScreen`. Skipped for Qt/Telegram windows, whose system caret is bogus. |
+| `MsaaCaretLocator` | Strategy 2 — MSAA (`oleacc`) `AccessibleObjectFromWindow(OBJID_CARET)` + `IAccessible::accLocation`, queried against the thread's focus/caret window. Cheap; covers many Chromium/Electron apps where the system caret is absent. |
+| `UiAutomationCaretLocator` | Strategy 3 — COM UI Automation `TextPattern2.GetCaretRange`, on a dedicated MTA worker thread. Single-flight (one request at a time), per-call timeout and a post-timeout cooldown so a hung provider degrades to the cursor instead of piling up work. Honours the caret's `isActive` flag and expands a degenerate range to a character to get a rectangle. |
+| `CursorFallbackLocator` | Strategy 4 — mouse cursor via `GetCursorPos`. |
 | `PopupPositionService` | Turns a caret rectangle into a final physical-pixel placement: per-monitor DPI, configured offsets, work-area clamping (handles negative coordinates). |
 | `LanguagePopupForm` | Display-only borderless, click-through, non-activating **layered** popup (per-pixel alpha via `UpdateLayeredWindow`). Reused across shows. |
 | `SettingsService` / `AppSettings` | Load/save JSON settings with defaults + clamping. |
 | `StartupService` | Optional autostart via `HKCU\...\Run` (per-user, no admin). |
 | `Logger` | Lightweight rotating file logger. Never logs keystrokes. |
-| `NativeMethods` / `Uia` | All P/Invoke and COM interop declarations; no logic. |
+| `NativeMethods` / `Uia` / `Msaa` | All P/Invoke and COM interop declarations; no logic. |
 
 ## Threading model
 
@@ -124,13 +125,19 @@ instance is created once at startup and reused for every show.
 `SetWindowsHookEx` (`WH_KEYBOARD_LL`), `UnhookWindowsHookEx`, `CallNextHookEx`,
 `GetModuleHandle`, `KBDLLHOOKSTRUCT`, `LLKHF_INJECTED`.
 
-**Foreground window / layout** (`user32`)
-`GetForegroundWindow`, `GetWindowThreadProcessId`, `GetKeyboardLayout`.
+**Foreground window / layout** (`user32`, `imm32`)
+`GetForegroundWindow`, `GetWindowThreadProcessId`, `GetKeyboardLayout`, `GetClassName`,
+`ImmGetDefaultIMEWnd` (console layout), `GetGUIThreadInfo` focus window (UWP layout).
 
 **Layout → code** (BCL) `CultureInfo`, LANGID extracted from the low word of the HKL.
 
+**CapsLock** (`user32`) `GetKeyState(VK_CAPITAL)`.
+
 **System caret** (`user32`)
 `GetGUIThreadInfo` (`GUITHREADINFO`, `hwndCaret`, `rcCaret`), `ClientToScreen`.
+
+**MSAA caret** (`oleacc`, hand-written COM interop)
+`AccessibleObjectFromWindow(OBJID_CARET)` → `IAccessible::accLocation` (vtable slot 22).
 
 **Mouse fallback** (`user32`) `GetCursorPos`.
 
@@ -145,9 +152,9 @@ instance is created once at startup and reused for every show.
 
 **UI Automation (COM interop, hand-written)** — CLSID `CUIAutomation`, interfaces
 `IUIAutomation::GetFocusedElement`, `IUIAutomationElement::GetCurrentPatternAs`,
-`IUIAutomationTextPattern2::GetCaretRange`, `IUIAutomationTextRange::GetBoundingRectangles`.
-(The managed `System.Windows.Automation` port on .NET does **not** expose `TextPattern2`,
-so the COM API is used directly.)
+`IUIAutomationTextPattern2::GetCaretRange`, `IUIAutomationTextRange::GetBoundingRectangles`
+and `::ExpandToEnclosingUnit`. (The managed `System.Windows.Automation` port on .NET does
+**not** expose `TextPattern2`, so the COM API is used directly.)
 
 **Autostart** (BCL) `Microsoft.Win32.Registry` — `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
@@ -187,10 +194,13 @@ desktop session (recommended check for the user).
 
 * Solution builds with **0 warnings / 0 errors** (Debug and Release), CI green on
   `windows-latest`.
-* **51 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
+* **55 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
   cancellation incl. a key held *before* the chord, auto-repeat, staleness), system-hotkey
-  interpretation, popup positioning (mixed DPI, edge flips, negative-origin monitors), and
-  settings normalization.
+  interpretation, popup positioning (mixed DPI, edge flips, negative-origin monitors),
+  settings normalization, and the CapsLock text composition.
+* The **MSAA** (`accLocation`, vtable slot 22) and updated **UI Automation** interop were
+  validated end-to-end against a focused control (real caret coordinates, no access
+  violation).
 * The app launches, installs the hook, writes logs, creates the correct camelCase
   `settings.json`, and **recovers from a corrupt settings file** (quarantines it and writes
   defaults — verified live); force-stop leaves a clean state.
@@ -205,3 +215,14 @@ desktop session (recommended check for the user).
 Criteria **1, 6, 7, 8, 9, 13** are best confirmed by using the app live: switch layouts
 with `Ctrl+Shift` in Notepad / a browser / VS Code, on single- and multi-monitor setups at
 100 %/125 %/150 %/200 % scaling, and observe focus, placement, and idle CPU.
+
+---
+
+## Acknowledgements
+
+The caret-detection strategy (the MSAA `OBJID_CARET` step, the console/UWP layout-window
+resolution, the Qt/Telegram guard, and the degenerate-range expansion) was informed by
+[yakunins/language-indicator](https://github.com/yakunins/language-indicator) (MIT), an
+AutoHotkey project with a different UX (per-language caret/cursor restyling). Its
+in-process shellcode-injection caret method is deliberately **not** used here, per this
+project's no-injection security constraint.

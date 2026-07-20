@@ -17,11 +17,16 @@ changing it) as well as the hardwired **`Win+Space`** switcher.
   keeps handling the switch normally.
 * It shows the layout that is *actually* active afterwards. If Windows decided not
   to switch, it shows the unchanged layout (it never assumes a change happened).
+* When **CapsLock** is on, the code is suffixed with `CAPS` (e.g. `EN CAPS`).
 
 The indicator appears:
 
 1. next to the **text caret** in the active application, or
 2. next to the **mouse cursor** when the caret cannot be located.
+
+The caret is located with a cascade of strategies for broad app coverage: the
+system caret (`GetGUIThreadInfo`) → MSAA (`oleacc`) → UI Automation
+(`TextPattern2`) → the mouse cursor.
 
 ---
 
@@ -170,10 +175,13 @@ never logged** — this is not a keylogger.
 
 * Does not run on the **Secure Desktop** (UAC prompt) or the **Windows lock/login
   screen** — a normal-privilege hook is inactive there.
-* The **text caret cannot be located in every application**. Apps that render text
-  themselves and expose no system caret or accessibility provider (some games,
-  terminals with custom rendering, certain custom controls) fall back to the
-  **mouse cursor** position.
+* The **text caret cannot be located in every application**. The cascade (system
+  caret → MSAA → UI Automation) covers most apps — including Chromium/Electron and
+  Qt/Telegram, which are special-cased — but apps that render text themselves and
+  expose no caret or accessibility provider (some games, terminals with custom
+  rendering, certain custom controls) fall back to the **mouse cursor** position.
+  Unlike some tools, this app never injects code into other processes to read the
+  caret, so a handful of hardened apps will always use the cursor fallback.
 * Layouts are shown as a two-letter code. `RU`, `EN`, `LT` are handled explicitly;
   everything else uses the two-letter ISO code from `CultureInfo`. Distinguishing
   several layouts of the same language (e.g. *English US* vs *English UK*) is possible

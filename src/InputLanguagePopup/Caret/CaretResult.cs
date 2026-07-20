@@ -7,6 +7,7 @@ public enum CaretSource
 {
     None,
     Win32Caret,
+    Msaa,
     UiAutomation,
     CursorFallback,
 }

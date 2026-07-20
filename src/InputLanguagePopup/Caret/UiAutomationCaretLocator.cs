@@ -167,12 +167,20 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
                 return CaretResult.NotFound;
             }
 
-            if (range.GetBoundingRectangles(out var rects) < 0 || rects is null)
+            var result = RectsFromRange(range);
+            if (result.IsValid)
             {
-                return CaretResult.NotFound;
+                return result;
             }
 
-            return ParseFirstRect(rects);
+            // A collapsed caret range can produce no bounding rectangle in some
+            // providers. Expand it to a single character and try again.
+            if (range.ExpandToEnclosingUnit(TextUnit_Character) >= 0)
+            {
+                result = RectsFromRange(range);
+            }
+
+            return result;
         }
         catch (COMException ex)
         {
@@ -185,6 +193,18 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
             Release(textPattern);
             Release(element);
         }
+    }
+
+    private const int TextUnit_Character = 0;
+
+    private static CaretResult RectsFromRange(IUIAutomationTextRange range)
+    {
+        if (range.GetBoundingRectangles(out var rects) < 0 || rects is null)
+        {
+            return CaretResult.NotFound;
+        }
+
+        return ParseFirstRect(rects);
     }
 
     private static CaretResult ParseFirstRect(double[] rects)
