@@ -3,9 +3,11 @@
 ## Overview
 
 The application is a tray-hosted WinForms app with **no main window**. It observes the
-keyboard with a global low-level hook, recognises the clean `Ctrl+Shift` chord, then
-(after a short delay) reads the *actually active* layout of the foreground window's
-thread and shows a small layered popup near the caret (or the mouse cursor).
+keyboard with a global low-level hook, recognises the layout-switch gestures (a clean
+`Ctrl+Shift` or `Alt+Shift` chord — whichever the system is configured for, read live
+from the registry — plus the hardwired `Win+Space`), then (after a short delay) reads
+the *actually active* layout of the foreground window's thread and shows a small
+layered popup near the caret (or the mouse cursor).
 
 ```
                  ┌────────────────────────────────────────────────────────────┐
@@ -20,12 +22,12 @@ thread and shows a small layered popup near the caret (or the mouse cursor).
           └──────────┬──────┘ └──────────────┘       │
                      │                          ┌────┴──────────────┬────────────────┐
           ┌──────────▼──────────┐        ┌──────▼──────┐  ┌─────────▼───────┐ ┌──────▼───────┐
-          │ CtrlShiftGesture    │        │ Win32Caret  │  │ UiAutomation    │ │ CursorFallback│
+          │ LayoutHotkeyGesture │        │ Win32Caret  │  │ UiAutomation    │ │ CursorFallback│
           │ Detector (pure FSM) │        │ Locator     │  │ CaretLocator    │ │ Locator       │
           └─────────────────────┘        │ GUIThreadInfo│  │ (COM, MTA thread)│ │ GetCursorPos │
                                          └─────────────┘  └─────────────────┘ └──────────────┘
 
-          Supporting:  PopupPositionService · SettingsService · StartupService · Logger · NativeMethods · Uia (COM interop)
+          Supporting:  SystemHotkeyService · PopupPositionService · SettingsService · StartupService · Logger · NativeMethods · Uia (COM interop)
 ```
 
 ## Components and responsibilities
@@ -35,7 +37,8 @@ thread and shows a small layered popup near the caret (or the mouse cursor).
 | `Program` | Entry point, single-instance mutex, high-DPI mode, global exception handlers. |
 | `TrayApplicationContext` | Wires services together; owns the tray icon/menu, timers, request lifecycle, and cleanup. The only place with orchestration logic. |
 | `GlobalKeyboardHook` | Installs/removes `WH_KEYBOARD_LL`; converts native events into `KeyDown`/`KeyUp`. **Never suppresses** keys; no business logic. |
-| `CtrlShiftGestureDetector` | Pure, Win32-independent state machine that recognises a clean `Ctrl+Shift` chord. Fully unit-tested. |
+| `LayoutHotkeyGestureDetector` | Pure, Win32-independent state machine that recognises the layout-switch gestures: clean `Ctrl+Shift` / `Alt+Shift` chords and `Win+Space` (incl. `Win+Shift+Space`). Reports *which* gesture completed; auto-discards state older than 10 s. Fully unit-tested. |
+| `SystemHotkeyService` | Reads `HKCU\Keyboard Layout\Toggle` (per completed gesture, off the hot path) to decide which chord actually switches layouts on this system — settings changes apply without restart. |
 | `InputLanguageService` | Foreground window → thread id → `GetKeyboardLayout`; converts the HKL to a display code (`RU`/`EN`/`LT`/ISO). |
 | `CaretLocator` | Cascades the three position strategies and returns a screen rectangle + its source. |
 | `Win32CaretLocator` | Strategy 1 — system caret via `GetGUIThreadInfo` + `ClientToScreen`. |
@@ -136,6 +139,10 @@ instance is created once at startup and reused for every show.
 so the COM API is used directly.)
 
 **Autostart** (BCL) `Microsoft.Win32.Registry` — `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+**System hotkey config** (BCL) `Microsoft.Win32.Registry` — `HKCU\Keyboard Layout\Toggle`
+(read-only: `Language Hotkey` / `Layout Hotkey` / legacy `Hotkey`; `1` = Alt+Shift,
+`2` = Ctrl+Shift, `3` = none, `4` = grave — unsupported).
 
 Explicitly **not** used: `RegisterHotKey`, `ActivateKeyboardLayout`, `LoadKeyboardLayout`,
 `GetKeyboardLayout(0)`, DLL injection, or any keystroke suppression.

@@ -26,7 +26,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly StartupService _startupService;
 
     private readonly GlobalKeyboardHook _hook;
-    private readonly CtrlShiftGestureDetector _detector;
+    private readonly LayoutHotkeyGestureDetector _detector;
+    private readonly SystemHotkeyService _systemHotkeys;
     private readonly InputLanguageService _languageService;
     private readonly CaretLocator _caretLocator;
     private readonly PopupPositionService _positionService;
@@ -55,12 +56,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settings = settings;
 
         _startupService = new StartupService(logger);
+        _systemHotkeys = new SystemHotkeyService(logger);
         _languageService = new InputLanguageService(logger);
         _caretLocator = new CaretLocator(logger, settings);
         _positionService = new PopupPositionService(settings);
         _popupForm = new LanguagePopupForm();
 
-        _detector = new CtrlShiftGestureDetector();
+        _detector = new LayoutHotkeyGestureDetector();
         _detector.GestureRecognized += OnGestureRecognized;
 
         _hook = new GlobalKeyboardHook(logger);
@@ -119,7 +121,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     // UI thread — but it is still *inside* the hook callback, which must return to
     // CallNextHookEx immediately. BeginInvoke defers the real work to a later
     // message-loop iteration.
-    private void OnGestureRecognized(object? sender, EventArgs e)
+    private void OnGestureRecognized(LayoutGesture gesture)
     {
         if (_disposed)
         {
@@ -130,7 +132,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             if (!_popupForm.IsDisposed)
             {
-                _popupForm.BeginInvoke(new Action(StartDetection));
+                _popupForm.BeginInvoke(new Action(() => StartDetection(gesture)));
             }
         }
         catch (InvalidOperationException)
@@ -139,10 +141,33 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    // Runs on the UI thread.
-    private void StartDetection()
+    /// <summary>
+    /// Does the completed gesture match how this system actually switches
+    /// layouts right now? Chords are gated by the live registry setting (read
+    /// per gesture — cheap, and picks up Settings changes without a restart);
+    /// Win+Space is hardwired in Windows and gated only by our own setting.
+    /// </summary>
+    private bool ShouldHandle(LayoutGesture gesture)
     {
-        if (_disposed || !_settings.Enabled)
+        if (gesture == LayoutGesture.WinSpace)
+        {
+            return _settings.HandleWinSpace;
+        }
+
+        var (ctrlShift, altShift) = _systemHotkeys.GetConfiguredChords();
+        return gesture switch
+        {
+            LayoutGesture.CtrlShift => ctrlShift,
+            LayoutGesture.AltShift => altShift,
+            _ => false,
+        };
+    }
+
+    // Runs on the UI thread (deferred out of the hook callback by BeginInvoke,
+    // so the registry read in ShouldHandle never runs inside the hook).
+    private void StartDetection(LayoutGesture gesture)
+    {
+        if (_disposed || !_settings.Enabled || !ShouldHandle(gesture))
         {
             return;
         }

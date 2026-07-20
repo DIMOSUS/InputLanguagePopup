@@ -24,6 +24,9 @@ public sealed class AppSettings
 
     public bool UseUiAutomation { get; set; } = true;
 
+    /// <summary>Also show the indicator after the hardwired Win+Space switcher.</summary>
+    public bool HandleWinSpace { get; set; } = true;
+
     public bool StartWithWindows { get; set; } = false;
 
     /// <summary>Clamp values to sane ranges so a hand-edited file cannot break the app.</summary>

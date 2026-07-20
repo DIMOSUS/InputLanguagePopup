@@ -48,6 +48,10 @@ public sealed class SettingsService
             var json = File.ReadAllText(_settingsPath);
             var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
             settings.Normalize();
+
+            // Re-save so fields added in newer versions appear in the file with
+            // their defaults instead of staying invisible.
+            Save(settings);
             return settings;
         }
         catch (Exception ex)

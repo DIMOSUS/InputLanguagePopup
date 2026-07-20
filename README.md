@@ -1,12 +1,14 @@
 # Input Language Popup
 
 A tiny background (tray) application for Windows that shows the **currently active
-keyboard layout** next to the text caret whenever you press the standard Windows
-layout-switch chord **`Ctrl+Shift`**.
+keyboard layout** next to the text caret whenever you switch layouts from the
+keyboard — with the toggle hotkey configured in Windows (**`Ctrl+Shift`** or
+**`Alt+Shift`**, read live from the system settings so no restart is needed after
+changing it) as well as the hardwired **`Win+Space`** switcher.
 
 * It **does not** switch the language itself.
-* It **does not** reserve, intercept, or block `Ctrl+Shift` — Windows keeps handling
-  the switch normally.
+* It **does not** reserve, intercept, or block any of these combinations — Windows
+  keeps handling the switch normally.
 * It shows the layout that is *actually* active afterwards. If Windows decided not
   to switch, it shows the unchanged layout (it never assumes a change happened).
 
@@ -104,6 +106,7 @@ There is no settings UI in this version — edit the JSON by hand and restart th
   "cursorOffsetX": 16,
   "cursorOffsetY": 20,
   "useUiAutomation": true,
+  "handleWinSpace": true,
   "startWithWindows": false
 }
 ```
@@ -117,6 +120,7 @@ There is no settings UI in this version — edit the JSON by hand and restart th
 | `caretOffsetX/Y`          | Offset (logical px) of the popup from the caret           |
 | `cursorOffsetX/Y`         | Offset (logical px) of the popup from the mouse cursor    |
 | `useUiAutomation`         | Enable the UI Automation caret fallback                   |
+| `handleWinSpace`          | Also show the indicator after `Win+Space`                 |
 | `startWithWindows`        | Autostart entry (mirrors the tray item)                   |
 
 Values are clamped to sane ranges on load.
@@ -149,6 +153,10 @@ never logged** — this is not a keylogger.
   everything else uses the two-letter ISO code from `CultureInfo`. Distinguishing
   several layouts of the same language (e.g. *English US* vs *English UK*) is possible
   in the design but not surfaced in this version.
+* The rare grave-accent (`` ` ``) layout hotkey (registry code 4, used for Thai and a
+  few other languages) is not supported. Per-layout direct hotkeys (e.g. a
+  `Ctrl+Shift+0` assignment under `HKCU\Control Panel\Input Method\Hot Keys`) are
+  intentionally ignored — a chord with an extra key never triggers the indicator.
 * Only one instance runs at a time (guarded by a named mutex).
 
 ---
