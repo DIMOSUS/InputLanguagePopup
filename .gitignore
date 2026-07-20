@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+publish/
+
+# Rider / VS
+.vs/
+.idea/
+*.user
+
+# Claude Code local session settings
+.claude/
+
+# OS
+Thumbs.db
+Desktop.ini
