@@ -218,15 +218,32 @@ public sealed class LayoutHotkeyGestureDetector
         RemoveExpired(_pressedNonModifiers, now);
 
         // If *any* modifier expired during an active chord, the chord is no longer
-        // trustworthy: its latched flags (_union, _ctrlShiftTogether, ...) still
-        // credit the expired key, which could fire a false gesture when the
-        // remaining, still-fresh modifier is released. Drop the whole chord and its
-        // held modifiers; auto-repeat re-populates any genuinely-held key.
+        // trustworthy: its latched flags (_union, _ctrlShiftTogether, ...) still credit
+        // the expired key, which could fire a false gesture when the remaining,
+        // still-fresh modifier is released. Rebase the chord onto only the modifiers
+        // that are still genuinely held — this drops the false-fire but keeps a real
+        // chord alive if one modifier's key-up was merely lost.
         if (_chordActive && modifierExpired)
         {
-            _pressedKeys.Clear();
-            ClearChordState();
+            RebaseChord();
         }
+    }
+
+    /// <summary>
+    /// Rebuild the chord's latched state from only the currently-held modifiers,
+    /// discarding flags that credited an expired key. If no modifiers remain, the
+    /// chord ends.
+    /// </summary>
+    private void RebaseChord()
+    {
+        _spaceSeen = false;
+        _cancelled = _pressedNonModifiers.Count != 0;
+
+        var held = HeldKinds();
+        _union = held;
+        _ctrlShiftTogether = (held & (Mods.Ctrl | Mods.Shift)) == (Mods.Ctrl | Mods.Shift);
+        _altShiftTogether = (held & (Mods.Alt | Mods.Shift)) == (Mods.Alt | Mods.Shift);
+        _chordActive = _pressedKeys.Count > 0;
     }
 
     private static bool RemoveExpired(Dictionary<int, long> held, long now)

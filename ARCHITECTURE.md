@@ -40,7 +40,6 @@ layered popup near the caret (or the mouse cursor).
 | `LayoutHotkeyGestureDetector` | Pure, Win32-independent state machine that recognises the layout-switch gestures: clean `Ctrl+Shift` / `Alt+Shift` chords and `Win+Space` (incl. `Win+Shift+Space`). Reports *which* gesture completed; auto-discards state older than 10 s. Fully unit-tested. |
 | `SystemHotkeyService` | Reads `HKCU\Keyboard Layout\Toggle` (per completed gesture, off the hot path) to decide which chord actually switches layouts on this system — settings changes apply without restart. |
 | `InputLanguageService` | Foreground window → thread id → `GetKeyboardLayout`; converts the HKL to a display code (`RU`/`EN`/`LT`/ISO). Resolves the layout-owning window for consoles (`ImmGetDefaultIMEWnd`) and UWP/Steam hosts (focus child). Composes the popup text, appending `CAPS` when CapsLock is on. |
-| `CapsLockTracker` | Tracks the CapsLock toggle by observing physical `VK_CAPITAL` events from the hook (auto-repeat ignored), since `GetKeyState` on the tray thread does not see the foreground app's input. |
 | `DpiProbeWindow` | A tiny never-shown Per-Monitor-V2 window used only to read a monitor's true DPI (`GetDpiForWindow` on our own handle) without moving the visible popup. |
 | `CaretLocator` | Cascades the three position strategies and returns a screen rectangle + its source. |
 | `Win32CaretLocator` | Strategy 1 — system caret via `GetGUIThreadInfo` + `ClientToScreen`. Skipped for Qt/Telegram windows, whose system caret is bogus. |
@@ -65,8 +64,9 @@ layered popup near the caret (or the mouse cursor).
   field so the GC cannot collect it. The gesture detector auto-discards state older
   than 10 s (aged **per key**, refreshed by auto-repeat), so a key-up lost to the
   secure desktop (UAC) cannot leave that key virtually held — even while the user keeps
-  typing. `SystemEvents.SessionSwitch` (lock/unlock, RDP, fast user switch) additionally
-  resets the detector and re-syncs CapsLock, marshalled onto the UI thread.
+  typing; if one modifier of a chord expires, the chord rebases onto the still-held
+  modifiers rather than firing falsely. `SystemEvents.SessionSwitch` (lock/unlock, RDP,
+  fast user switch) additionally resets the detector, marshalled onto the UI thread.
 * **UI thread** — starts the detection sequence, assigns each chord a monotonically
   increasing **request id**, cancels the previous request's `CancellationTokenSource`,
   and shows/updates the popup. UI mutations happen only here, via `Control.BeginInvoke`
@@ -139,8 +139,9 @@ instance is created once at startup and reused for every show.
 
 **Layout → code** (BCL) `CultureInfo`, LANGID extracted from the low word of the HKL.
 
-**CapsLock** — tracked from hook `VK_CAPITAL` events (`CapsLockTracker`); `GetKeyState(VK_CAPITAL)`
-only for the initial baseline and session-switch re-sync.
+**CapsLock** (`user32`) `GetKeyState(VK_CAPITAL)` at show time. On this message-pumping,
+hook-owning thread it reliably reflects the global toggle state (verified empirically),
+and the just-processed gesture keeps it fresh — so no separate state tracking is needed.
 
 **System caret** (`user32`)
 `GetGUIThreadInfo` (`GUITHREADINFO`, `hwndCaret`, `rcCaret`), `ClientToScreen`.
@@ -203,11 +204,11 @@ desktop session (recommended check for the user).
 
 * Solution builds with **0 warnings / 0 errors** (Debug and Release), CI green on
   `windows-latest`.
-* **63 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
-  cancellation incl. a key held *before* the chord, auto-repeat, and per-key staleness —
-  including a key stuck while the user keeps typing), CapsLock tracking (toggle,
-  auto-repeat, resync), system-hotkey interpretation, popup positioning (mixed DPI, edge
-  flips, negative-origin monitors), settings normalization, and CapsLock text composition.
+* **60 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
+  cancellation incl. a key held *before* the chord, auto-repeat, per-key staleness —
+  including a key stuck while the user keeps typing, partial-expiry rebasing both ways),
+  system-hotkey interpretation, popup positioning (mixed DPI, edge flips, negative-origin
+  monitors), settings normalization, and CapsLock text composition.
 * The **MSAA** (`accLocation`, slot 22) + **UI Automation** chain on the bounded worker
   returns real caret coordinates; the **`DpiProbeWindow`** returns per-monitor DPI and does
   **not** move the visible popup during a second probe — both validated at runtime.

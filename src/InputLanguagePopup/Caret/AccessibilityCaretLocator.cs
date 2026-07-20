@@ -231,6 +231,10 @@ public sealed class AccessibilityCaretLocator : IDisposable
         return ParseFirstRect(rects);
     }
 
+    // No real screen coordinate approaches this; larger values are a broken provider
+    // and would overflow the int conversion below.
+    private const double MaxCoord = 1_000_000;
+
     private static CaretResult ParseFirstRect(double[] rects)
     {
         // The SAFEARRAY holds groups of four doubles: left, top, width, height,
@@ -242,11 +246,14 @@ public sealed class AccessibilityCaretLocator : IDisposable
             var width = rects[i + 2];
             var height = rects[i + 3];
 
-            // Validate all four as finite before rounding — NaN/Infinity height
-            // would slip past a bare "height <= 0" and corrupt the int conversion.
+            // Validate all four as finite and in range before rounding — NaN/Infinity
+            // height would slip past a bare "height <= 0", and a huge finite value
+            // (e.g. 1e100) would overflow the int conversion.
             if (!double.IsFinite(left) || !double.IsFinite(top) ||
                 !double.IsFinite(width) || !double.IsFinite(height) ||
-                width < 0 || height <= 0)
+                width < 0 || height <= 0 ||
+                Math.Abs(left) > MaxCoord || Math.Abs(top) > MaxCoord ||
+                width > MaxCoord || height > MaxCoord)
             {
                 continue;
             }

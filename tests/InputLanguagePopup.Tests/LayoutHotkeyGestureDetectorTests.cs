@@ -583,6 +583,31 @@ public class LayoutHotkeyGestureDetectorTests
         Assert.Empty(fired);      // the stale Ctrl must not contribute to a fire
     }
 
+    [Fact] // After one modifier expires, a still-held modifier can still form a real chord
+    public void ExpiredModifier_ThenRealChordOnHeldModifier_Fires()
+    {
+        long now = 0;
+        var d = new LayoutHotkeyGestureDetector(() => now);
+        var fired = new List<LayoutGesture>();
+        d.GestureRecognized += g => fired.Add(g);
+
+        d.OnKeyDown(VK_LCONTROL); // its key-up will be lost
+
+        now = 5_000;
+        d.OnKeyDown(VK_LSHIFT);   // Shift genuinely held from here on
+
+        // Ctrl expires; the chord rebases onto the still-held Shift (not cleared).
+        now = LayoutHotkeyGestureDetector.StaleChordTimeoutMs + 1;
+        d.OnKeyDown(VK_LSHIFT);   // Shift auto-repeat (refreshes it, triggers purge)
+
+        // User now presses Ctrl for real → a genuine simultaneous Ctrl+Shift.
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyUp(VK_LCONTROL);
+        d.OnKeyUp(VK_LSHIFT);
+
+        Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);
+    }
+
     [Fact] // Stuck key expires even while other keys keep firing (a global timer would not)
     public void StuckKey_WhileTypingContinuously_ExpiresAndChordFires()
     {

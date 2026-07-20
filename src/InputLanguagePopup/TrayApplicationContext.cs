@@ -28,7 +28,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private readonly GlobalKeyboardHook _hook;
     private readonly LayoutHotkeyGestureDetector _detector;
-    private readonly CapsLockTracker _capsLock;
     private readonly SystemHotkeyService _systemHotkeys;
     private readonly InputLanguageService _languageService;
     private readonly CaretLocator _caretLocator;
@@ -71,13 +70,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _detector = new LayoutHotkeyGestureDetector();
         _detector.GestureRecognized += OnGestureRecognized;
 
-        _capsLock = new CapsLockTracker(IsCapsLockOn());
-
         _hook = new GlobalKeyboardHook(logger);
         _hook.KeyDown += _detector.OnKeyDown;
         _hook.KeyUp += _detector.OnKeyUp;
-        _hook.KeyDown += _capsLock.OnKeyDown;
-        _hook.KeyUp += _capsLock.OnKeyUp;
 
         // --- Tray icon + menu ---
         _enabledItem = new ToolStripMenuItem("Enabled", null, OnToggleEnabled)
@@ -143,12 +138,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             if (!_popupForm.IsDisposed)
             {
-                _popupForm.BeginInvoke(new Action(() =>
-                {
-                    _detector.Reset();
-                    // The CapsLock state may have changed on the lock screen.
-                    _capsLock.Resync(IsCapsLockOn());
-                }));
+                _popupForm.BeginInvoke(new Action(_detector.Reset));
             }
         }
         catch (InvalidOperationException)
@@ -333,7 +323,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     // Runs on the UI thread — Win32 positioning and the DPI probe are safe here.
-    // CapsLock comes from _capsLock (tracked from hook events), not GetKeyState.
+    // CapsLock is read via GetKeyState: on this message-pumping, hook-owning thread it
+    // reliably reflects the global toggle state (verified empirically), and the gesture
+    // that triggered this was just processed by our hook, so the state is fresh.
     private void ShowOnUi(int id, ProbeResult probe, bool isSecond)
     {
         if (_disposed || id != _requestId || !_settings.Enabled)
@@ -341,7 +333,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             return; // stale request or disabled
         }
 
-        var text = InputLanguageService.ComposeDisplayText(probe.Code, _capsLock.IsOn);
+        var text = InputLanguageService.ComposeDisplayText(probe.Code, IsCapsLockOn());
         var logicalSize = LanguagePopupForm.MeasureLogicalSize(text);
         var dpiScale = _dpiProbe.GetScaleForPoint(PopupPositionService.GetAnchorPoint(probe.Caret));
         var placement = _positionService.Compute(probe.Caret, logicalSize, dpiScale);
@@ -416,7 +408,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             var hkl = _languageService.GetForegroundLayout(out _);
             var code = _languageService.GetDisplayCode(hkl) ?? "EN";
-            var text = InputLanguageService.ComposeDisplayText(code, _capsLock.IsOn);
+            var text = InputLanguageService.ComposeDisplayText(code, IsCapsLockOn());
 
             if (!GetCursorPos(out var pt))
             {
@@ -535,8 +527,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             _hook.KeyDown -= _detector.OnKeyDown;
             _hook.KeyUp -= _detector.OnKeyUp;
-            _hook.KeyDown -= _capsLock.OnKeyDown;
-            _hook.KeyUp -= _capsLock.OnKeyUp;
             _hook.Dispose();
 
             _caretLocator.Dispose();
