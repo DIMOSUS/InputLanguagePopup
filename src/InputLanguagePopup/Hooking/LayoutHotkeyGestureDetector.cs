@@ -49,7 +49,8 @@ public sealed class LayoutHotkeyGestureDetector
         Win = 8,
     }
 
-    private readonly HashSet<int> _pressedKeys = new();
+    private readonly HashSet<int> _pressedKeys = new();          // held modifier keys
+    private readonly HashSet<int> _pressedNonModifiers = new();  // held ordinary keys
     private readonly Func<long> _ticks;
     private long _lastEventTicks;
 
@@ -92,9 +93,11 @@ public sealed class LayoutHotkeyGestureDetector
         {
             if (_pressedKeys.Count == 0)
             {
-                // First modifier of a fresh chord.
+                // First modifier of a fresh chord. A non-modifier key that was
+                // already physically held before the chord began (e.g. "S down,
+                // then Ctrl+Shift") means this is not a clean chord.
                 _chordActive = true;
-                _cancelled = false;
+                _cancelled = _pressedNonModifiers.Count != 0;
                 _spaceSeen = false;
                 _union = Mods.None;
                 _ctrlShiftTogether = false;
@@ -118,6 +121,9 @@ public sealed class LayoutHotkeyGestureDetector
 
             return;
         }
+
+        // Track ordinary keys so a chord starting while one is held is rejected.
+        _pressedNonModifiers.Add(vk);
 
         if (!_chordActive)
         {
@@ -148,6 +154,7 @@ public sealed class LayoutHotkeyGestureDetector
 
         if (KindOf(vk) is null)
         {
+            _pressedNonModifiers.Remove(vk);
             return;
         }
 
@@ -223,6 +230,7 @@ public sealed class LayoutHotkeyGestureDetector
     public void Reset()
     {
         _pressedKeys.Clear();
+        _pressedNonModifiers.Clear();
         _chordActive = false;
         _cancelled = false;
         _spaceSeen = false;

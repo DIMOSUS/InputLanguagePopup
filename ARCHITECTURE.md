@@ -42,7 +42,7 @@ layered popup near the caret (or the mouse cursor).
 | `InputLanguageService` | Foreground window → thread id → `GetKeyboardLayout`; converts the HKL to a display code (`RU`/`EN`/`LT`/ISO). |
 | `CaretLocator` | Cascades the three position strategies and returns a screen rectangle + its source. |
 | `Win32CaretLocator` | Strategy 1 — system caret via `GetGUIThreadInfo` + `ClientToScreen`. |
-| `UiAutomationCaretLocator` | Strategy 2 — COM UI Automation `TextPattern2.GetCaretRange`, on a dedicated MTA worker thread with a timeout. |
+| `UiAutomationCaretLocator` | Strategy 2 — COM UI Automation `TextPattern2.GetCaretRange`, on a dedicated MTA worker thread. Single-flight (one request at a time), per-call timeout and a post-timeout cooldown so a hung provider degrades to the cursor instead of piling up work. Honours the caret's `isActive` flag. |
 | `CursorFallbackLocator` | Strategy 3 — mouse cursor via `GetCursorPos`. |
 | `PopupPositionService` | Turns a caret rectangle into a final physical-pixel placement: per-monitor DPI, configured offsets, work-area clamping (handles negative coordinates). |
 | `LanguagePopupForm` | Display-only borderless, click-through, non-activating **layered** popup (per-pixel alpha via `UpdateLayeredWindow`). Reused across shows. |
@@ -61,7 +61,8 @@ layered popup near the caret (or the mouse cursor).
   No UI Automation, no caret lookup, no blocking calls. The delegate is held in a
   field so the GC cannot collect it. The gesture detector auto-discards state older
   than 10 s, so key-ups lost to the secure desktop (UAC) cannot leave modifiers
-  virtually held.
+  virtually held. `SystemEvents.SessionSwitch` (lock/unlock, RDP, fast user switch)
+  additionally resets the detector, marshalled onto the UI thread.
 * **UI thread** — starts the detection sequence, assigns each chord a monotonically
   increasing **request id**, cancels the previous request's `CancellationTokenSource`,
   and shows/updates the popup. UI mutations happen only here, via `Control.BeginInvoke`
@@ -70,8 +71,12 @@ layered popup near the caret (or the mouse cursor).
   so the UI thread is never blocked while a probe (which may call into UI Automation)
   is in progress.
 * **UI Automation MTA worker** — a single long-lived background thread owns the COM
-  `IUIAutomation` object. Every request is bounded by a timeout; if a provider hangs,
-  the result is abandoned rather than blocking the indicator.
+  `IUIAutomation` object. An in-process COM call cannot be forcibly aborted, so the
+  worker uses *containment*: a single-flight gate means at most one request is ever
+  in flight (extras return immediately → cursor fallback, so the queue never grows);
+  the caller waits at most the timeout; and after a timeout UI Automation is skipped
+  for a short cooldown. A permanently hung provider therefore just keeps UI
+  Automation disabled instead of leaking work items.
 
 **Staleness protection:** each chord's request id is checked again on the UI thread
 before the popup is shown, and a newer chord cancels the previous request's token, so an
@@ -89,10 +94,16 @@ nothing changed the second read is a no-op (the hide timer is not restarted).
 
 The process is **Per-Monitor V2** DPI aware (declared in `app.manifest`, mirrored by
 `Application.SetHighDpiMode`). All screen coordinates are treated as physical pixels.
-`PopupPositionService` selects the monitor under the anchor with `MonitorFromPoint`,
-reads its work area (`GetMonitorInfo`) and effective DPI (`GetDpiForMonitor`), scales the
-popup size and offsets accordingly, and clamps the result to that monitor's work area —
-correctly handling monitors placed left of / above the primary (negative coordinates).
+`PopupPositionService` selects the monitor under the anchor with `MonitorFromPoint`
+(using an anchor stepped one pixel inside the exclusive caret rectangle so a caret on a
+monitor's last column/row does not pick the neighbour), reads its work area
+(`GetMonitorInfo`), scales the popup size and offsets, and clamps the result to that
+monitor's work area — correctly handling monitors placed left of / above the primary
+(negative coordinates). DPI for caret sources comes from `GetDpiForWindow` on the
+foreground window (the API Microsoft recommends for Per-Monitor-V2 processes), falling
+back to `GetDpiForMonitor` for the cursor case. The pure geometry lives in
+`ComputeLocation` and is covered by unit tests (mixed DPI, edge flips, negative-origin
+monitors).
 
 ## The popup window
 
@@ -151,9 +162,9 @@ Explicitly **not** used: `RegisterHotKey`, `ActivateKeyboardLayout`, `LoadKeyboa
 
 ## Acceptance-criteria verification report
 
-Legend: **Auto** = verified programmatically in this session · **Design** = guaranteed by
-code/design and reviewed · **Manual** = requires an interactive desktop session (recommended
-check for the user).
+Legend: **Auto** = verified programmatically in this session · **Design** = expected from
+the code and reviewed, but not runtime-verified here · **Manual** = requires an interactive
+desktop session (recommended check for the user).
 
 | # | Criterion | Status | Notes |
 |---|-----------|--------|-------|
@@ -170,14 +181,19 @@ check for the user).
 | 11 | Hook removed cleanly on exit | Auto/Design | `Exit` → `ExitThread` → `Dispose` calls `UnhookWindowsHookEx`; logged. |
 | 12 | No administrator rights required | Auto | Manifest `asInvoker`; runs as normal user; autostart under `HKCU`. |
 | 13 | Negligible CPU at idle | Design | Event-driven; no polling loops; timers only during a ~1 s popup. Manual check recommended. |
-| 14 | No leaks of windows, hooks, COM objects, timers | Design | Hook unhooked; COM RCWs released (`Marshal.ReleaseComObject`); GDI objects freed; timers/tray disposed; MTA worker joined. |
+| 14 | No leaks of windows, hooks, COM objects, timers | Design | Reviewed: hook unhooked; COM RCWs released (`Marshal.ReleaseComObject`); GDI objects freed; timers/tray disposed; `SystemEvents` unsubscribed; MTA worker joined. Not measured with a leak profiler. |
 
 ### Verified in this session (automated)
 
-* Solution builds with **0 warnings / 0 errors** (Debug and Release).
-* **14/14** `CtrlShiftGestureDetector` unit tests pass (covers criteria 3 & 5 logic).
-* The app launches, installs the hook, writes logs, and creates the correct
-  `settings.json`; force-stop leaves a clean state.
+* Solution builds with **0 warnings / 0 errors** (Debug and Release), CI green on
+  `windows-latest`.
+* **51 unit tests** pass: the gesture state machine (Ctrl+Shift / Alt+Shift / Win+Space,
+  cancellation incl. a key held *before* the chord, auto-repeat, staleness), system-hotkey
+  interpretation, popup positioning (mixed DPI, edge flips, negative-origin monitors), and
+  settings normalization.
+* The app launches, installs the hook, writes logs, creates the correct camelCase
+  `settings.json`, and **recovers from a corrupt settings file** (quarantines it and writes
+  defaults — verified live); force-stop leaves a clean state.
 * **Self-contained single-file x64 publish** succeeds (~50 MB `.exe`) and the published
   binary launches and installs the hook.
 * The hand-written **COM UI Automation** caret path returns real caret coordinates

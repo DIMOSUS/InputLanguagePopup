@@ -65,7 +65,9 @@ A tray icon (`AЯ`) appears. Right-click it for the menu:
 dotnet test InputLanguagePopup.sln -c Release
 ```
 
-The unit tests cover the `Ctrl+Shift` gesture recognition logic (14 scenarios).
+The unit tests cover the gesture-recognition state machine (Ctrl+Shift / Alt+Shift /
+Win+Space, cancellation, staleness), the system-hotkey interpretation, popup
+positioning (DPI, multi-monitor, negative coordinates), and settings normalization.
 
 ## Publish (self-contained, single-file, x64)
 
@@ -148,7 +150,8 @@ There is no settings UI in this version — edit the JSON by hand and restart th
 | `handleWinSpace`          | Also show the indicator after `Win+Space`                 |
 | `startWithWindows`        | Autostart entry (mirrors the tray item)                   |
 
-Values are clamped to sane ranges on load.
+Values are clamped to sane ranges on load. If the file cannot be parsed it is moved
+aside to `settings.corrupt.<timestamp>.json` and a fresh default file is written.
 
 ## Logs
 
@@ -182,7 +185,12 @@ never logged** — this is not a keylogger.
   few other languages) is not supported. Per-layout direct hotkeys (e.g. a
   `Ctrl+Shift+0` assignment under `HKCU\Control Panel\Input Method\Hot Keys`) are
   intentionally ignored — a chord with an extra key never triggers the indicator.
-* Only one instance runs at a time (guarded by a named mutex).
+* **Synthetic (injected) key events are ignored.** A layout switch triggered by
+  AutoHotkey, key-remapping tools, or some accessibility software will not show the
+  indicator, even if Windows actually changed the layout — the hook filters
+  `LLKHF_INJECTED` so that programmatic input cannot trigger a popup.
+* One instance runs **per user session** (guarded by a session-local mutex), so Fast
+  User Switching / RDP sessions each get their own indicator.
 
 ---
 

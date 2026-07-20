@@ -9,7 +9,11 @@ namespace InputLanguagePopup.Input;
 ///
 ///   "Language Hotkey" / legacy "Hotkey" — switch input language,
 ///   "Layout Hotkey"                     — switch keyboard layout,
-///   values: "1" = Left Alt+Shift, "2" = Ctrl+Shift, "3" = none, "4" = grave (`).
+///   values: "1" = Alt+Shift, "2" = Ctrl+Shift, "3" = none, "4" = grave (`).
+///
+/// Windows' code "1" is specifically <i>Left</i> Alt+Shift; the detector, however,
+/// treats either Alt as an Alt+Shift chord (right Alt normally arrives as AltGr =
+/// Ctrl+Alt and is filtered out anyway). This is deliberately permissive.
 ///
 /// The key is read on every completed chord (a registry read costs microseconds
 /// and happens off the hot path), so changes made in Windows settings take
@@ -41,8 +45,8 @@ public sealed class SystemHotkeyService
                 return (CtrlShift: false, AltShift: true);
             }
 
-            var language = ReadCode(key, "Language Hotkey") ?? ReadCode(key, "Hotkey") ?? 1;
-            var layout = ReadCode(key, "Layout Hotkey") ?? 3;
+            var language = ReadCode(key, "Language Hotkey") ?? ReadCode(key, "Hotkey");
+            var layout = ReadCode(key, "Layout Hotkey");
 
             if ((language == 4 || layout == 4) && !_graveLogged)
             {
@@ -50,9 +54,7 @@ public sealed class SystemHotkeyService
                 _logger.Info("The grave-accent layout hotkey (code 4) is configured; the indicator does not support it.");
             }
 
-            return (
-                CtrlShift: language == 2 || layout == 2,
-                AltShift: language == 1 || layout == 1);
+            return InterpretCodes(language, layout);
         }
         catch (Exception ex)
         {
@@ -66,6 +68,21 @@ public sealed class SystemHotkeyService
             // than to never show it.
             return (CtrlShift: true, AltShift: true);
         }
+    }
+
+    /// <summary>
+    /// Map the raw registry codes to the chords that switch layouts. Pure and
+    /// unit-testable. A missing "Language Hotkey" defaults to the Windows default
+    /// (Alt+Shift); a missing "Layout Hotkey" defaults to disabled.
+    /// </summary>
+    internal static (bool CtrlShift, bool AltShift) InterpretCodes(int? language, int? layout)
+    {
+        var lang = language ?? 1;   // Windows default: Alt+Shift
+        var lay = layout ?? 3;      // default: none
+
+        return (
+            CtrlShift: lang == 2 || lay == 2,
+            AltShift: lang == 1 || lay == 1);
     }
 
     private static int? ReadCode(RegistryKey key, string valueName)

@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using InputLanguagePopup.Autostart;
 using InputLanguagePopup.Caret;
 using InputLanguagePopup.Diagnostics;
@@ -99,6 +100,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         // Keep the autostart registry entry in sync with the persisted setting.
         SyncStartupWithSetting();
 
+        // Lock / unlock, RDP connect/disconnect and fast-user-switch can swallow
+        // key-up events; clear gesture state so modifiers cannot get stuck.
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+
         try
         {
             _hook.Install();
@@ -115,6 +120,28 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     // ---- Gesture handling ------------------------------------------------
+
+    // May run on a SystemEvents thread; marshal the reset onto the UI thread so it
+    // does not race the hook callback that also mutates the detector.
+    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!_popupForm.IsDisposed)
+            {
+                _popupForm.BeginInvoke(new Action(_detector.Reset));
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Form handle gone (shutting down) — ignore.
+        }
+    }
 
     // Raised from inside the WH_KEYBOARD_LL callback. Low-level hook callbacks run
     // on the installing thread (our UI thread), so this is technically already the
@@ -288,7 +315,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             return null;
         }
 
-        var placement = _positionService.Compute(caret, LanguagePopupForm.LogicalSize);
+        var placement = _positionService.Compute(caret, LanguagePopupForm.LogicalSize, hwnd);
         return new ProbeResult(code, placement);
     }
 
@@ -326,6 +353,17 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (!_settings.Enabled)
         {
+            // Cancel any probe already in flight so a delayed layout check cannot
+            // pop the indicator up after the user just turned it off.
+            try
+            {
+                _cts?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already disposed by a superseding request — nothing to cancel.
+            }
+
             _popupForm.HidePopup();
         }
     }
@@ -350,7 +388,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
 
             var caret = new CaretResult(CaretSource.CursorFallback, new Rectangle(pt.X, pt.Y, 0, 0));
-            var placement = _positionService.Compute(caret, LanguagePopupForm.LogicalSize);
+            var placement = _positionService.Compute(caret, LanguagePopupForm.LogicalSize, IntPtr.Zero);
             _popupForm.ShowPopup(code, placement, _settings.PopupDurationMs);
         }
         catch (Exception ex)
@@ -371,12 +409,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         try
         {
-            var actuallyEnabled = _startupService.IsEnabled();
-            if (_settings.StartWithWindows && !actuallyEnabled)
+            // When enabled, call SetEnabled unconditionally: it rewrites the value
+            // only if missing or pointing elsewhere, repairing a stale path left by
+            // moving the portable executable.
+            if (_settings.StartWithWindows)
             {
                 _startupService.SetEnabled(true);
             }
-            else if (!_settings.StartWithWindows && actuallyEnabled)
+            else if (_startupService.IsEnabled())
             {
                 _startupService.SetEnabled(false);
             }
@@ -424,6 +464,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _disposed = true;
             _logger.Info("Application shutting down.");
+
+            SystemEvents.SessionSwitch -= OnSessionSwitch;
 
             try
             {

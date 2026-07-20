@@ -56,8 +56,35 @@ public sealed class SettingsService
         }
         catch (Exception ex)
         {
-            _logger.Error("Failed to load settings; falling back to defaults.", ex);
-            return new AppSettings();
+            _logger.Error("Failed to load settings; quarantining the file and writing defaults.", ex);
+
+            // Move the unreadable file aside so it is not retried on every launch,
+            // then write a fresh default file (matches the documented behaviour).
+            QuarantineCorruptFile();
+
+            var defaults = new AppSettings();
+            Save(defaults);
+            return defaults;
+        }
+    }
+
+    private void QuarantineCorruptFile()
+    {
+        try
+        {
+            if (File.Exists(_settingsPath))
+            {
+                var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                var corruptPath = Path.Combine(
+                    Path.GetDirectoryName(_settingsPath)!,
+                    $"settings.corrupt.{stamp}.json");
+                File.Move(_settingsPath, corruptPath, overwrite: true);
+                _logger.Info($"Corrupt settings moved to {corruptPath}.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Failed to quarantine the corrupt settings file.", ex);
         }
     }
 

@@ -314,6 +314,50 @@ public class LayoutHotkeyGestureDetectorTests
         Assert.Empty(fired);
     }
 
+    [Fact] // A key held down *before* the chord begins is not a clean chord
+    public void KeyHeldBeforeChord_DoesNotFire()
+    {
+        var (d, fired) = CreateDetector();
+
+        d.OnKeyDown(VK_S);        // S pressed first and kept held
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyDown(VK_LSHIFT);
+        d.OnKeyUp(VK_LSHIFT);
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Empty(fired);
+    }
+
+    [Fact] // ...even if that pre-held key is released partway through the chord
+    public void KeyHeldBeforeChord_ReleasedMidChord_DoesNotFire()
+    {
+        var (d, fired) = CreateDetector();
+
+        d.OnKeyDown(VK_S);
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyDown(VK_LSHIFT);
+        d.OnKeyUp(VK_S);          // released, but the chord was already dirty
+        d.OnKeyUp(VK_LSHIFT);
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Empty(fired);
+    }
+
+    [Fact] // A key released before the chord starts leaves no residue
+    public void KeyPressedAndReleasedBeforeChord_StillFires()
+    {
+        var (d, fired) = CreateDetector();
+
+        d.OnKeyDown(VK_S);
+        d.OnKeyUp(VK_S);          // fully released before any modifier
+        d.OnKeyDown(VK_LCONTROL);
+        d.OnKeyDown(VK_LSHIFT);
+        d.OnKeyUp(VK_LSHIFT);
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);
+    }
+
     [Fact]
     public void ThirdKeyReleasedBeforeModifiers_StillCancels()
     {

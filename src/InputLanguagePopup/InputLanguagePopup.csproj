@@ -23,4 +23,10 @@
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
 
+  <!-- Expose internal, Win32-free helpers (InterpretCodes, ComputeLocation) to the
+       test project so their pure logic can be unit tested. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="InputLanguagePopup.Tests" />
+  </ItemGroup>
+
 </Project>

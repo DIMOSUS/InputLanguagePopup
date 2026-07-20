@@ -10,7 +10,9 @@ namespace InputLanguagePopup;
 internal static class Program
 {
     private const string AppFolderName = "InputLanguagePopup";
-    private const string SingleInstanceMutexName = "Global\\InputLanguagePopup_SingleInstance_{2F3C0B0A-9A1E-4B7A-9C1D-4A9F0E1B2C3D}";
+    // Session-local (not Global\): one instance *per user session*, so Fast User
+    // Switching / RDP sessions each get their own tray indicator.
+    private const string SingleInstanceMutexName = "Local\\InputLanguagePopup_SingleInstance_{2F3C0B0A-9A1E-4B7A-9C1D-4A9F0E1B2C3D}";
 
     [STAThread]
     private static void Main()

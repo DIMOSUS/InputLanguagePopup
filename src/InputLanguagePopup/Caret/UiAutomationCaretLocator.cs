@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using InputLanguagePopup.Diagnostics;
 using InputLanguagePopup.Interop;
 
@@ -11,34 +12,58 @@ namespace InputLanguagePopup.Caret;
 /// <summary>
 /// Strategy 2: the caret via COM UI Automation TextPattern2.GetCaretRange.
 ///
-/// UI Automation calls can block if the target provider is slow or hung, and
-/// must never run on the keyboard-hook thread. All work is marshalled to a single
-/// long-lived MTA worker thread and every request is bounded by a timeout — if a
-/// provider hangs, the result is abandoned rather than blocking the indicator.
+/// UI Automation calls can block if the target provider is slow or hung, and must
+/// never run on the keyboard-hook thread. Work is marshalled to a single
+/// long-lived MTA worker thread. Because an in-process COM call cannot be forcibly
+/// aborted, robustness is achieved by containment rather than cancellation:
+///
+///  * <b>Single-flight</b> — at most one request is ever in flight. If a request
+///    arrives while the worker is busy, the caller gets <see cref="CaretResult.NotFound"/>
+///    immediately (and falls back to the cursor). The queue therefore never grows.
+///  * <b>Timeout</b> — the caller waits at most <c>timeoutMs</c>. A hung provider
+///    keeps the worker (and the single-flight slot) occupied; it is simply never
+///    freed, so UI Automation stays disabled until the call returns — instead of
+///    piling up work and leaking events.
+///  * <b>Cooldown</b> — after a timeout, UI Automation is skipped entirely for a
+///    short window, so a transient stall does not cause repeated 150 ms waits.
 /// </summary>
 public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
 {
+    private const int CooldownMs = 5000;
+
     private readonly Logger _logger;
     private readonly int _timeoutMs;
+    private readonly Func<long> _ticks;
     private readonly BlockingCollection<Action> _queue = new();
     private readonly Thread _worker;
     private volatile bool _disposed;
 
+    // Single-flight gate: 0 = free, 1 = a request is in flight. Released by the
+    // worker when (if) it finishes the current request.
+    private int _busy;
+
+    // Ticks until which UI Automation is skipped after a timeout.
+    private long _cooldownUntil;
+
+    // The in-flight request's completion source (only one at a time).
+    private TaskCompletionSource<CaretResult>? _current;
+
     // Owned by the worker thread only.
     private IUIAutomation? _automation;
 
-    public UiAutomationCaretLocator(Logger logger, int timeoutMs = 150)
+    public UiAutomationCaretLocator(Logger logger, int timeoutMs = 150, Func<long>? tickProvider = null)
     {
         _logger = logger;
         _timeoutMs = timeoutMs;
+        _ticks = tickProvider ?? (static () => Environment.TickCount64);
 
         _worker = new Thread(WorkerLoop)
         {
             IsBackground = true,
             Name = "UIAutomationCaretWorker",
         };
-        // MTA: the UIA COM client does not require a message pump there, and our
-        // timeout can safely abandon a hung call.
+        // MTA: the UIA COM client does not require a message pump there, and a hung
+        // call can safely be abandoned by the caller.
         _worker.SetApartmentState(ApartmentState.MTA);
         _worker.Start();
     }
@@ -50,45 +75,65 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
             return CaretResult.NotFound;
         }
 
-        var done = new ManualResetEventSlim(false);
-        var result = CaretResult.NotFound;
+        var now = _ticks();
+        if (Volatile.Read(ref _cooldownUntil) > now)
+        {
+            // Still recovering from a recent timeout — skip UI Automation.
+            return CaretResult.NotFound;
+        }
+
+        // Single-flight: bail out immediately if the worker is already busy.
+        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
+        {
+            return CaretResult.NotFound;
+        }
+
+        var tcs = new TaskCompletionSource<CaretResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _current = tcs;
 
         try
         {
-            _queue.Add(() =>
-            {
-                try
-                {
-                    result = LocateOnWorker();
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error("UI Automation caret lookup threw.", ex);
-                }
-                finally
-                {
-                    done.Set();
-                }
-            });
+            _queue.Add(RunCurrent);
         }
         catch (Exception ex)
         {
             _logger.Error("Failed to enqueue UI Automation work.", ex);
-            done.Dispose();
+            Volatile.Write(ref _busy, 0);
             return CaretResult.NotFound;
         }
 
-        if (!done.Wait(_timeoutMs))
+        if (tcs.Task.Wait(_timeoutMs))
         {
-            _logger.Warn($"UI Automation caret lookup timed out after {_timeoutMs} ms.");
-            return CaretResult.NotFound;
+            // The worker completed and has already released the single-flight slot.
+            return tcs.Task.Result;
         }
 
-        // NB: 'done' is intentionally not disposed on either outcome.
-        // ManualResetEventSlim.Dispose is not thread-safe against a concurrent
-        // Set(): even after Wait returns, the worker may still be inside Set().
-        // The GC finalizes the (rarely allocated) kernel handle.
-        return result;
+        // Timed out: the worker still owns the slot (it will release it if/when the
+        // COM call returns). Put UI Automation on cooldown so we do not keep waiting.
+        Volatile.Write(ref _cooldownUntil, _ticks() + CooldownMs);
+        _logger.Warn($"UI Automation caret lookup timed out after {_timeoutMs} ms; cooling down for {CooldownMs} ms.");
+        return CaretResult.NotFound;
+    }
+
+    private void RunCurrent()
+    {
+        var tcs = _current;
+        var result = CaretResult.NotFound;
+        try
+        {
+            result = LocateOnWorker();
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("UI Automation caret lookup threw.", ex);
+        }
+        finally
+        {
+            // Release the slot *before* completing, so a waiter that already timed
+            // out (or a fresh request) can proceed immediately.
+            Volatile.Write(ref _busy, 0);
+            tcs?.TrySetResult(result);
+        }
     }
 
     private CaretResult LocateOnWorker()
@@ -113,7 +158,11 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
                 return CaretResult.NotFound;
             }
 
-            if (textPattern.GetCaretRange(out _, out range) < 0 || range is null)
+            // isActive == 0 means the range is a last-known / inactive caret, which
+            // could place the popup at a stale position — prefer the cursor fallback.
+            if (textPattern.GetCaretRange(out var isActive, out range) < 0 ||
+                isActive == 0 ||
+                range is null)
             {
                 return CaretResult.NotFound;
             }
@@ -227,6 +276,8 @@ public sealed class UiAutomationCaretLocator : ICaretPositionSource, IDisposable
             // ignore
         }
 
+        // The worker may be stuck in a hung COM call; it is a background thread and
+        // will not block process exit regardless.
         _worker.Join(TimeSpan.FromMilliseconds(500));
         _queue.Dispose();
     }
