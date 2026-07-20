@@ -1,3 +1,5 @@
+using System;
+
 namespace InputLanguagePopup.Input;
 
 /// <summary>
@@ -15,22 +17,50 @@ namespace InputLanguagePopup.Input;
 /// </summary>
 public sealed class CapsLockTracker
 {
+    /// <summary>
+    /// If a key-down arrives more than this long after the previous one while the
+    /// press latch is still set, the earlier key-up was lost (e.g. to the secure
+    /// desktop) — treat the new key-down as a fresh physical press so the state
+    /// self-heals instead of ignoring every future toggle.
+    /// </summary>
+    public const int StaleLatchTimeoutMs = 10_000;
+
     private const int VK_CAPITAL = 0x14;
 
+    private readonly Func<long> _ticks;
     private bool _on;
     private bool _physicallyDown; // guards against auto-repeat re-toggling
+    private long _lastDownTicks;
 
-    public CapsLockTracker(bool initialOn)
+    public CapsLockTracker(bool initialOn, Func<long>? tickProvider = null)
     {
         _on = initialOn;
+        _ticks = tickProvider ?? (static () => Environment.TickCount64);
     }
 
     public bool IsOn => _on;
 
     public void OnKeyDown(int vk)
     {
+        if (vk != VK_CAPITAL)
+        {
+            return;
+        }
+
+        var now = _ticks();
+
+        // A long gap while still "down" means the key-up was lost; re-arm the latch
+        // so this counts as a new press. Genuine auto-repeat fires far faster than
+        // the timeout, so it never re-arms and never double-toggles.
+        if (_physicallyDown && now - _lastDownTicks > StaleLatchTimeoutMs)
+        {
+            _physicallyDown = false;
+        }
+
+        _lastDownTicks = now;
+
         // CapsLock toggles on the initial press; auto-repeat key-downs must not.
-        if (vk == VK_CAPITAL && !_physicallyDown)
+        if (!_physicallyDown)
         {
             _on = !_on;
             _physicallyDown = true;

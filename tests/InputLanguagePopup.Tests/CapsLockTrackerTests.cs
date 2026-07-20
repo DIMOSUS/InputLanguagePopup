@@ -66,4 +66,36 @@ public class CapsLockTrackerTests
         t.OnKeyDown(VK_CAPITAL);
         Assert.True(t.IsOn);
     }
+
+    [Fact] // A lost CapsLock key-up must not freeze the state forever
+    public void LostKeyUp_ThenLaterPress_SelfHeals()
+    {
+        long now = 0;
+        var t = new CapsLockTracker(false, () => now);
+
+        t.OnKeyDown(VK_CAPITAL); // toggles on; key-up then lost (secure desktop)
+        Assert.True(t.IsOn);
+
+        // Much later the user presses CapsLock again. Without self-heal this would
+        // be ignored as auto-repeat; instead it re-arms and toggles.
+        now = CapsLockTracker.StaleLatchTimeoutMs + 1;
+        t.OnKeyDown(VK_CAPITAL);
+        Assert.False(t.IsOn);
+    }
+
+    [Fact] // Genuine auto-repeat (fast) still does not re-toggle
+    public void FastAutoRepeat_DoesNotReToggle()
+    {
+        long now = 0;
+        var t = new CapsLockTracker(false, () => now);
+
+        t.OnKeyDown(VK_CAPITAL); // on
+        for (var i = 0; i < 100; i++)
+        {
+            now += 33; // ~30/s auto-repeat, far under the timeout
+            t.OnKeyDown(VK_CAPITAL);
+        }
+
+        Assert.True(t.IsOn); // still a single toggle
+    }
 }

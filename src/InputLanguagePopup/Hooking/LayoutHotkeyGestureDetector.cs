@@ -214,21 +214,26 @@ public sealed class LayoutHotkeyGestureDetector
     /// </summary>
     private void PurgeStale(long now)
     {
-        RemoveExpired(_pressedKeys, now);
+        var modifierExpired = RemoveExpired(_pressedKeys, now);
         RemoveExpired(_pressedNonModifiers, now);
 
-        // If the active chord lost all of its modifiers to expiry, drop it silently.
-        if (_chordActive && _pressedKeys.Count == 0)
+        // If *any* modifier expired during an active chord, the chord is no longer
+        // trustworthy: its latched flags (_union, _ctrlShiftTogether, ...) still
+        // credit the expired key, which could fire a false gesture when the
+        // remaining, still-fresh modifier is released. Drop the whole chord and its
+        // held modifiers; auto-repeat re-populates any genuinely-held key.
+        if (_chordActive && modifierExpired)
         {
+            _pressedKeys.Clear();
             ClearChordState();
         }
     }
 
-    private static void RemoveExpired(Dictionary<int, long> held, long now)
+    private static bool RemoveExpired(Dictionary<int, long> held, long now)
     {
         if (held.Count == 0)
         {
-            return;
+            return false;
         }
 
         List<int>? stale = null;
@@ -240,13 +245,17 @@ public sealed class LayoutHotkeyGestureDetector
             }
         }
 
-        if (stale is not null)
+        if (stale is null)
         {
-            foreach (var vk in stale)
-            {
-                held.Remove(vk);
-            }
+            return false;
         }
+
+        foreach (var vk in stale)
+        {
+            held.Remove(vk);
+        }
+
+        return true;
     }
 
     private void ClearChordState()

@@ -332,8 +332,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         return new ProbeResult(code, caret, hwnd);
     }
 
-    // Runs on the UI thread — which processes keyboard input, so CapsLock reads
-    // fresh, and Win32 positioning calls are safe here.
+    // Runs on the UI thread — Win32 positioning and the DPI probe are safe here.
+    // CapsLock comes from _capsLock (tracked from hook events), not GetKeyState.
     private void ShowOnUi(int id, ProbeResult probe, bool isSecond)
     {
         if (_disposed || id != _requestId || !_settings.Enabled)

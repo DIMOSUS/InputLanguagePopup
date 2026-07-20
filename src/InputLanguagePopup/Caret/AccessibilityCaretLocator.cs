@@ -242,9 +242,11 @@ public sealed class AccessibilityCaretLocator : IDisposable
             var width = rects[i + 2];
             var height = rects[i + 3];
 
-            if (double.IsNaN(left) || double.IsNaN(top) ||
-                double.IsInfinity(left) || double.IsInfinity(top) ||
-                height <= 0)
+            // Validate all four as finite before rounding — NaN/Infinity height
+            // would slip past a bare "height <= 0" and corrupt the int conversion.
+            if (!double.IsFinite(left) || !double.IsFinite(top) ||
+                !double.IsFinite(width) || !double.IsFinite(height) ||
+                width < 0 || height <= 0)
             {
                 continue;
             }

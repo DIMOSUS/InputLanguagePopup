@@ -563,6 +563,26 @@ public class LayoutHotkeyGestureDetectorTests
         Assert.Equal(new[] { LayoutGesture.CtrlShift }, fired);
     }
 
+    [Fact] // One modifier expiring mid-chord must void the whole chord (no false fire)
+    public void ExpiredModifier_WhileOtherModifierRemains_DoesNotFire()
+    {
+        long now = 0;
+        var d = new LayoutHotkeyGestureDetector(() => now);
+        var fired = new List<LayoutGesture>();
+        d.GestureRecognized += g => fired.Add(g);
+
+        d.OnKeyDown(VK_LCONTROL); // its key-up is later lost
+
+        now = LayoutHotkeyGestureDetector.StaleChordTimeoutMs - 100;
+        d.OnKeyDown(VK_LSHIFT);   // Ctrl still counted; ctrlShiftTogether latches
+
+        now += 200;               // Ctrl is now stale, Shift is still fresh
+        d.OnKeyUp(VK_LSHIFT);
+        d.OnKeyUp(VK_LCONTROL);
+
+        Assert.Empty(fired);      // the stale Ctrl must not contribute to a fire
+    }
+
     [Fact] // Stuck key expires even while other keys keep firing (a global timer would not)
     public void StuckKey_WhileTypingContinuously_ExpiresAndChordFires()
     {
