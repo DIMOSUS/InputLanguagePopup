@@ -1,6 +1,7 @@
 # Input Language Popup
 
 [![CI](https://github.com/DIMOSUS/InputLanguagePopup/actions/workflows/ci.yml/badge.svg)](https://github.com/DIMOSUS/InputLanguagePopup/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/DIMOSUS/InputLanguagePopup?label=release)](https://github.com/DIMOSUS/InputLanguagePopup/releases/latest)
 
 A tiny background (tray) application for Windows that shows the **currently active
 keyboard layout** next to the text caret whenever you switch layouts from the
