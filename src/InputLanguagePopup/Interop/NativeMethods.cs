@@ -64,6 +64,10 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetKeyboardLayout(uint idThread);
 
+    /// <summary>Installed input locales (diagnostics).</summary>
+    [DllImport("user32.dll")]
+    public static extern uint GetKeyboardLayoutList(int nBuff, [Out] IntPtr[]? lpList);
+
     [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetClassNameNative(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 

@@ -67,6 +67,10 @@ internal static class SelfTest
                 Ok($"layout: hwnd=0x{hwnd:X} hkl=0x{hkl:X} code={code}");
             }
 
+            // Full layout picture — the first thing to look at when the popup shows
+            // the wrong language on a particular machine.
+            Log("     " + languageService.DescribeLayoutState());
+
             var (ctrlShift, altShift) = new SystemHotkeyService(logger).GetConfiguredChords();
             Ok($"hotkeys: ctrlShift={ctrlShift} altShift={altShift}");
             Ok($"capslock: {IsCapsLockOn()}");

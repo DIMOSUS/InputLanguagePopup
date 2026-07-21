@@ -48,7 +48,16 @@ internal static class Program
             var settingsService = new SettingsService(appDataDir, logger);
             var settings = settingsService.Load();
 
-            using var app = new TrayApplication(logger, settingsService, settings);
+            var verbose = Array.Exists(args, a => a.Equals("--diag", StringComparison.OrdinalIgnoreCase));
+            if (verbose)
+            {
+                logger.Info("Verbose layout diagnostics enabled (--diag).");
+            }
+
+            using var app = new TrayApplication(logger, settingsService, settings)
+            {
+                VerboseDiagnostics = verbose,
+            };
             RunMessageLoop(logger);
         }
         catch (Exception ex)

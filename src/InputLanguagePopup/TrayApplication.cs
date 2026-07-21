@@ -56,6 +56,12 @@ public sealed class TrayApplication : IDisposable
     // later on the UI thread, so the popup can size itself to the final text.
     private readonly record struct ProbeResult(string Code, CaretResult Caret, IntPtr Hwnd);
 
+    /// <summary>
+    /// <c>--diag</c>: log a detailed layout reading for every recognised gesture, so
+    /// a machine where the popup shows the wrong language can be diagnosed.
+    /// </summary>
+    public bool VerboseDiagnostics { get; init; }
+
     public TrayApplication(Logger logger, SettingsService settingsService, AppSettings settings)
     {
         _logger = logger;
@@ -323,6 +329,11 @@ public sealed class TrayApplication : IDisposable
 
     private ProbeResult? Probe()
     {
+        if (VerboseDiagnostics)
+        {
+            _logger.Info("DIAG " + _languageService.DescribeLayoutState());
+        }
+
         var hkl = _languageService.GetForegroundLayout(out var hwnd);
         if (hwnd == IntPtr.Zero)
         {

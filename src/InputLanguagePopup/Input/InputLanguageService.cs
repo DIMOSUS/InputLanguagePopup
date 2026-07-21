@@ -96,6 +96,67 @@ public sealed class InputLanguageService
         => capsLockOn ? code + " CAPS" : code;
 
     /// <summary>
+    /// One line describing every way of reading the current layout, for
+    /// <c>--diag</c>. If the popup shows the wrong language on some machine, this
+    /// tells us which source is actually correct there.
+    /// </summary>
+    public string DescribeLayoutState()
+    {
+        try
+        {
+            var fg = GetForegroundWindow();
+            var fgClass = fg == IntPtr.Zero ? "<none>" : GetClassName(fg);
+            var fgThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
+
+            var layoutWindow = fg == IntPtr.Zero ? IntPtr.Zero : ResolveLayoutWindow(fg);
+            var layoutThread = layoutWindow == IntPtr.Zero ? 0 : GetWindowThreadProcessId(layoutWindow, out _);
+
+            // What we currently use.
+            var chosen = layoutThread == 0 ? IntPtr.Zero : GetKeyboardLayout(layoutThread);
+
+            // Alternatives to compare against.
+            var byForegroundThread = fgThread == 0 ? IntPtr.Zero : GetKeyboardLayout(fgThread);
+            var ownThread = GetKeyboardLayout(0);
+
+            var focusWindow = IntPtr.Zero;
+            var byFocusThread = IntPtr.Zero;
+            if (fgThread != 0)
+            {
+                var gti = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+                if (GetGUIThreadInfo(fgThread, ref gti) && gti.hwndFocus != IntPtr.Zero)
+                {
+                    focusWindow = gti.hwndFocus;
+                    var focusThread = GetWindowThreadProcessId(focusWindow, out _);
+                    if (focusThread != 0)
+                    {
+                        byFocusThread = GetKeyboardLayout(focusThread);
+                    }
+                }
+            }
+
+            var installed = string.Empty;
+            var count = GetKeyboardLayoutList(0, null);
+            if (count > 0)
+            {
+                var list = new IntPtr[count];
+                GetKeyboardLayoutList((int)count, list);
+                installed = string.Join(",", Array.ConvertAll(list, h => $"0x{h.ToInt64():X}"));
+            }
+
+            return $"fg=0x{fg:X} class='{fgClass}' fgThread={fgThread} " +
+                   $"layoutWnd=0x{layoutWindow:X} layoutThread={layoutThread} | " +
+                   $"CHOSEN hkl=0x{chosen.ToInt64():X} code={GetDisplayCode(chosen) ?? "<null>"} | " +
+                   $"fgThread hkl=0x{byForegroundThread.ToInt64():X} code={GetDisplayCode(byForegroundThread) ?? "<null>"} | " +
+                   $"focusWnd=0x{focusWindow:X} hkl=0x{byFocusThread.ToInt64():X} code={GetDisplayCode(byFocusThread) ?? "<null>"} | " +
+                   $"ownThread hkl=0x{ownThread.ToInt64():X} | installed=[{installed}]";
+        }
+        catch (Exception ex)
+        {
+            return "DescribeLayoutState failed: " + ex.Message;
+        }
+    }
+
+    /// <summary>
     /// Convert an HKL into a short uppercase display code, or <c>null</c> if it
     /// cannot be resolved (caller should then skip showing the indicator).
     /// </summary>
