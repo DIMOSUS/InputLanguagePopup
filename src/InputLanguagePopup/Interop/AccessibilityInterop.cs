@@ -14,9 +14,12 @@ internal static unsafe class Msaa
 {
     public const uint OBJID_CARET = 0xFFFFFFF8;
 
-    // IAccessible vtable: IUnknown (0-2), IDispatch (3-6), then the IAccessible
-    // members; accLocation is the 16th IAccessible member → slot 22.
-    private const int SlotAccLocation = 22;
+    // ABSOLUTE vtable index. IAccessible is a dual interface: IUnknown (3 slots),
+    // then IDispatch (4), then the IAccessible members. accLocation is the 16th
+    // IAccessible member (index 15), so 3 + 4 + 15 = 22.
+    private const int IUnknownSlots = 3;
+    private const int IDispatchSlots = 4;
+    private const int SlotAccLocation = IUnknownSlots + IDispatchSlots + 15; // 22
 
     private const ushort VT_I4 = 3;
 

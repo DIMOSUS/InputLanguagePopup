@@ -62,7 +62,7 @@ internal static class Win32Ui
         public NativeMethods.POINT pt;
     }
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern int GetMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -202,4 +202,23 @@ internal static class Win32Ui
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern uint RegisterWindowMessageW([MarshalAs(UnmanagedType.LPWStr)] string lpString);
+
+    // ---- Used by --selftest to build a focused rich-edit control ---------
+    public const int WS_CHILD = 0x40000000;
+    public const int WS_VISIBLE = 0x10000000;
+    public const int SW_SHOW = 5;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr LoadLibraryW([MarshalAs(UnmanagedType.LPWStr)] string lpLibFileName);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowTextW(IntPtr hWnd, [MarshalAs(UnmanagedType.LPWStr)] string lpString);
 }

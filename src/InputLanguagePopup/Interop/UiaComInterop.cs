@@ -43,20 +43,33 @@ internal static unsafe class Uia
 
     private const uint CLSCTX_INPROC_SERVER = 1;
 
-    // IUIAutomation: CompareElements, CompareRuntimeIds, GetRootElement,
-    // ElementFromHandle, ElementFromPoint, [5] GetFocusedElement.
-    private const int SlotGetFocusedElement = 5;
+    // Slot indices below are ABSOLUTE vtable positions, so every one starts after
+    // the three IUnknown entries (QueryInterface=0, AddRef=1, Release=2). The
+    // constants are written as "IUnknownSlots + n" where n is the method's position
+    // within its own interface, to keep that offset impossible to forget.
+    private const int IUnknownSlots = 3;
 
-    // IUIAutomationElement: ... [11] GetCurrentPatternAs.
-    private const int SlotGetCurrentPatternAs = 11;
+    // IUIAutomation: 0 CompareElements, 1 CompareRuntimeIds, 2 GetRootElement,
+    // 3 ElementFromHandle, 4 ElementFromPoint, 5 GetFocusedElement.
+    private const int SlotGetFocusedElement = IUnknownSlots + 5;   // 8
 
-    // IUIAutomationTextPattern2 (TextPattern's 6 methods + RangeFromAnnotation):
-    // [7] GetCaretRange.
-    private const int SlotGetCaretRange = 7;
+    // IUIAutomationElement: 0 SetFocus, 1 GetRuntimeId, 2 FindFirst, 3 FindAll,
+    // 4 FindFirstBuildCache, 5 FindAllBuildCache, 6 BuildUpdatedCache,
+    // 7 GetCurrentPropertyValue, 8 GetCurrentPropertyValueEx,
+    // 9 GetCachedPropertyValue, 10 GetCachedPropertyValueEx, 11 GetCurrentPatternAs.
+    private const int SlotGetCurrentPatternAs = IUnknownSlots + 11; // 14
 
-    // IUIAutomationTextRange: [3] ExpandToEnclosingUnit, [7] GetBoundingRectangles.
-    private const int SlotExpandToEnclosingUnit = 3;
-    private const int SlotGetBoundingRectangles = 7;
+    // IUIAutomationTextPattern2 (TextPattern's six methods, then RangeFromAnnotation):
+    // 0 RangeFromPoint, 1 RangeFromChild, 2 GetSelection, 3 GetVisibleRanges,
+    // 4 get_DocumentRange, 5 get_SupportedTextSelection, 6 RangeFromAnnotation,
+    // 7 GetCaretRange.
+    private const int SlotGetCaretRange = IUnknownSlots + 7;        // 10
+
+    // IUIAutomationTextRange: 0 Clone, 1 Compare, 2 CompareEndpoints,
+    // 3 ExpandToEnclosingUnit, 4 FindAttribute, 5 FindText, 6 GetAttributeValue,
+    // 7 GetBoundingRectangles.
+    private const int SlotExpandToEnclosingUnit = IUnknownSlots + 3; // 6
+    private const int SlotGetBoundingRectangles = IUnknownSlots + 7; // 10
 
     [DllImport("ole32.dll")]
     private static extern int CoCreateInstance(

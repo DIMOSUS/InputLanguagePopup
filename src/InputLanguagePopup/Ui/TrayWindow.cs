@@ -24,6 +24,13 @@ public sealed class TrayWindow : Win32Window
 
     private readonly Logger _logger;
     private readonly ConcurrentQueue<Action> _posted = new();
+    private readonly string _tooltip;
+
+    // Explorer broadcasts this when the notification area is recreated (e.g. after
+    // an explorer.exe restart); without re-adding the icon the app would keep
+    // running but become completely unreachable.
+    private readonly uint _taskbarCreated = RegisterWindowMessageW("TaskbarCreated");
+
     private IntPtr _iconHandle;
     private bool _iconAdded;
 
@@ -38,7 +45,18 @@ public sealed class TrayWindow : Win32Window
     {
         _logger = logger;
         _iconHandle = iconHandle;
+        _tooltip = tooltip;
 
+        AddIcon();
+
+        if (!WTSRegisterSessionNotification(Handle, NOTIFY_FOR_THIS_SESSION))
+        {
+            _logger.Warn($"WTSRegisterSessionNotification failed. Win32 error {Marshal.GetLastWin32Error()}.");
+        }
+    }
+
+    private void AddIcon()
+    {
         var data = new NOTIFYICONDATAW
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
@@ -46,8 +64,8 @@ public sealed class TrayWindow : Win32Window
             uID = TrayIconId,
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_APP_TRAY,
-            hIcon = iconHandle,
-            szTip = tooltip,
+            hIcon = _iconHandle,
+            szTip = _tooltip,
             szInfo = string.Empty,
             szInfoTitle = string.Empty,
         };
@@ -55,15 +73,11 @@ public sealed class TrayWindow : Win32Window
         if (!Shell_NotifyIconW(NIM_ADD, ref data))
         {
             _logger.Error($"Shell_NotifyIcon(NIM_ADD) failed. Win32 error {Marshal.GetLastWin32Error()}.");
+            _iconAdded = false;
         }
         else
         {
             _iconAdded = true;
-        }
-
-        if (!WTSRegisterSessionNotification(Handle, NOTIFY_FOR_THIS_SESSION))
-        {
-            _logger.Warn($"WTSRegisterSessionNotification failed. Win32 error {Marshal.GetLastWin32Error()}.");
         }
     }
 
@@ -74,8 +88,14 @@ public sealed class TrayWindow : Win32Window
     public void Post(Action action)
     {
         _posted.Enqueue(action);
-        PostMessageW(Handle, WM_APP_INVOKE, IntPtr.Zero, IntPtr.Zero);
+        if (!PostMessageW(Handle, WM_APP_INVOKE, IntPtr.Zero, IntPtr.Zero))
+        {
+            _logger.Warn($"PostMessage(WM_APP_INVOKE) failed. Win32 error {Marshal.GetLastWin32Error()}.");
+        }
     }
+
+    protected override void OnWindowProcException(Exception exception)
+        => _logger.Error("Tray window procedure threw.", exception);
 
     /// <summary>
     /// Show the tray context menu at the cursor and return the chosen item id
@@ -123,6 +143,14 @@ public sealed class TrayWindow : Win32Window
 
     protected override IntPtr WindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // Explorer restarted and recreated the notification area — put our icon back.
+        if (msg == _taskbarCreated && _taskbarCreated != 0)
+        {
+            _logger.Info("Notification area recreated; re-adding the tray icon.");
+            AddIcon();
+            return IntPtr.Zero;
+        }
+
         switch (msg)
         {
             case WM_APP_INVOKE:

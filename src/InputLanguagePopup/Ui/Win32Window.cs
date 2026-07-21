@@ -21,7 +21,7 @@ public abstract class Win32Window : IDisposable
 
     protected Win32Window(string name, int exStyle, int style, int width = 0, int height = 0)
     {
-        _wndProc = WindowProc;
+        _wndProc = WindowProcGuarded;
         // Unique per instance so repeated runs / multiple windows never collide.
         _className = $"InputLanguagePopup.{name}.{Guid.NewGuid():N}";
         _hInstance = NativeMethods.GetModuleHandle(null);
@@ -52,9 +52,32 @@ public abstract class Win32Window : IDisposable
 
     public IntPtr Handle => _handle;
 
+    /// <summary>
+    /// The real entry point from native code. An exception must never propagate out
+    /// of a window procedure (under Native AOT that tears down the process), so
+    /// everything is contained here and the message falls through to DefWindowProc.
+    /// </summary>
+    private IntPtr WindowProcGuarded(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        try
+        {
+            return WindowProc(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception ex)
+        {
+            OnWindowProcException(ex);
+            return Default(hWnd, msg, wParam, lParam);
+        }
+    }
+
     /// <summary>Override to handle messages; call <see cref="Default"/> for the rest.</summary>
     protected virtual IntPtr WindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
         => Default(hWnd, msg, wParam, lParam);
+
+    /// <summary>Called when <see cref="WindowProc"/> threw; override to log.</summary>
+    protected virtual void OnWindowProcException(Exception exception)
+    {
+    }
 
     protected static IntPtr Default(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
         => DefWindowProcW(hWnd, msg, wParam, lParam);

@@ -89,8 +89,28 @@ public sealed class LanguagePopupWindow : Win32Window
             _currentSize.Width, _currentSize.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        SetTimer(Handle, HideTimerId, (uint)Math.Max(50, durationMs), IntPtr.Zero);
+        if (SetTimer(Handle, HideTimerId, (uint)Math.Max(50, durationMs), IntPtr.Zero) == IntPtr.Zero)
+        {
+            // Without a timer the popup would stay on screen forever — hide it now.
+            _logger.Warn($"SetTimer(hide) failed. Win32 error {Marshal.GetLastWin32Error()}; hiding immediately.");
+            HidePopup();
+            return;
+        }
+
         _hideTimerRunning = true;
+    }
+
+    protected override void OnWindowProcException(Exception exception)
+    {
+        _logger.Error("Popup window procedure threw; hiding the popup.", exception);
+        try
+        {
+            HidePopup();
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     public void HidePopup()
@@ -128,7 +148,13 @@ public sealed class LanguagePopupWindow : Win32Window
         // Begin a short fade-out (kept cheap: re-blits the same bitmap at lower
         // constant alpha, no re-rendering).
         _fadeStep = 0;
-        SetTimer(Handle, FadeTimerId, FadeIntervalMs, IntPtr.Zero);
+        if (SetTimer(Handle, FadeTimerId, FadeIntervalMs, IntPtr.Zero) == IntPtr.Zero)
+        {
+            _logger.Warn($"SetTimer(fade) failed. Win32 error {Marshal.GetLastWin32Error()}; hiding immediately.");
+            HidePopup();
+            return;
+        }
+
         _fadeTimerRunning = true;
     }
 
