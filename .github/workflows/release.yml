@@ -49,13 +49,21 @@ jobs:
       - name: Verify the published binary (self-test)
         shell: pwsh
         run: |
-          & ./publish/InputLanguagePopup.exe --selftest
-          Start-Sleep -Seconds 3
+          # Start-Process -Wait, not "&": the app is a WinExe (GUI subsystem), which
+          # PowerShell does not wait for, so "&" would read $LASTEXITCODE and the log
+          # before the self-test has finished.
+          $proc = Start-Process -FilePath ./publish/InputLanguagePopup.exe `
+                                -ArgumentList '--selftest' -PassThru -Wait
           $log = Join-Path $env:LOCALAPPDATA 'InputLanguagePopup\selftest.log'
+          if (Test-Path $log) { Get-Content $log }
+
+          # Two independent gates: the process exit code and the log verdict.
+          if ($proc.ExitCode -ne 0) {
+            throw "Self-test exited with code $($proc.ExitCode)."
+          }
           if (-not (Test-Path $log)) { throw 'Self-test produced no log.' }
-          Get-Content $log
           if (-not (Select-String -Path $log -Pattern 'SELFTEST PASSED' -Quiet)) {
-            throw 'Self-test did not pass.'
+            throw 'Self-test did not report PASSED.'
           }
 
       - name: Name the release asset

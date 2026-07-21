@@ -138,22 +138,89 @@ internal static class SelfTest
             return;
         }
 
-        using var host = new SelfTestHostWindow();
-        var edit = CreateWindowExW(0, "RICHEDIT50W", null,
-            WS_CHILD | WS_VISIBLE | 0x0004 /* ES_MULTILINE */,
-            0, 0, 300, 80, host.Handle, IntPtr.Zero, NativeMethods.GetModuleHandle(null), IntPtr.Zero);
-
-        if (edit == IntPtr.Zero)
+        // Not disposed with `using`: if the UIA worker times out below it may still be
+        // blocked inside a COM call, and destroying the window under it would leave it
+        // poking at a dead HWND. On the happy path it is disposed explicitly.
+        var host = new SelfTestHostWindow();
+        var keepHostAlive = false;
+        try
         {
-            Fail("uia: could not create the RichEdit control");
+            var edit = CreateWindowExW(0, "RICHEDIT50W", null,
+                WS_CHILD | WS_VISIBLE | 0x0004 /* ES_MULTILINE */,
+                0, 0, 300, 80, host.Handle, IntPtr.Zero, NativeMethods.GetModuleHandle(null), IntPtr.Zero);
+
+            if (edit == IntPtr.Zero)
+            {
+                Fail("uia: could not create the RichEdit control");
+                return;
+            }
+
+            SetWindowTextW(edit, "self test caret");
+            ShowWindow(host.Handle, SW_SHOW);
+            ForceForeground(host.Handle);
+            SetFocus(edit);
+            PumpFor(300);
+
+            // Make sure we are actually probing *our* control: otherwise UIA reports
+            // whatever else happens to be focused and the test proves nothing.
+            var foreground = GetForegroundWindow();
+            var focused = GetFocus();
+            if (foreground != host.Handle || focused != edit)
+            {
+                Fail($"uia: could not focus the test control (foreground=0x{foreground:X} " +
+                     $"expected 0x{host.Handle:X}, focus=0x{focused:X} expected 0x{edit:X})");
+                return;
+            }
+
+            GetWindowRect(edit, out var editRect);
+            keepHostAlive = RunUiaChain(editRect);
+        }
+        finally
+        {
+            if (!keepHostAlive)
+            {
+                host.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs the UIA chain on a worker thread (the provider lives on this thread, so
+    /// the calls must not run here) and returns true if the worker is still stuck,
+    /// meaning the host window must be left alive.
+    /// </summary>
+    /// <summary>
+    /// Take the foreground by briefly attaching to the current foreground thread's
+    /// input queue — a bare SetForegroundWindow is refused for a process that does
+    /// not already own the foreground.
+    /// </summary>
+    private static void ForceForeground(IntPtr hWnd)
+    {
+        var foreground = GetForegroundWindow();
+        if (foreground == hWnd)
+        {
             return;
         }
 
-        SetWindowTextW(edit, "self test caret");
-        ShowWindow(host.Handle, SW_SHOW);
-        SetForegroundWindow(host.Handle);
-        SetFocus(edit);
-        PumpFor(300);
+        var us = GetCurrentThreadId();
+        var them = foreground == IntPtr.Zero ? us : NativeMethods.GetWindowThreadProcessId(foreground, out _);
+
+        var attached = them != us && AttachThreadInput(us, them, true);
+        try
+        {
+            SetForegroundWindow(hWnd);
+        }
+        finally
+        {
+            if (attached)
+            {
+                AttachThreadInput(us, them, false);
+            }
+        }
+    }
+
+    private static bool RunUiaChain(NativeMethods.RECT editRect)
+    {
 
         // The UIA provider lives on this (window-owning) thread, so the COM calls
         // must run elsewhere while we keep pumping — otherwise they deadlock.
@@ -188,9 +255,17 @@ internal static class SelfTest
                     return;
                 }
 
+                // Match the app: an inactive range is a last-known caret and is
+                // rejected there, so accepting it here would weaken the gate.
                 if (Uia.GetCaretRange(pattern, out var isActive, out range) < 0 || range == IntPtr.Zero)
                 {
                     failure = "GetCaretRange returned nothing";
+                    return;
+                }
+
+                if (!isActive)
+                {
+                    failure = "GetCaretRange reported an inactive caret";
                     return;
                 }
 
@@ -224,20 +299,46 @@ internal static class SelfTest
         worker.IsBackground = true;
         worker.Start();
 
-        while (worker.IsAlive)
+        // Bounded, for the same reason the app bounds its accessibility calls: a hung
+        // provider must not hang the release job. Keep pumping so the provider (which
+        // lives on this thread) can answer, but give up after the deadline.
+        var deadline = Environment.TickCount64 + UiaTimeoutMs;
+        while (worker.IsAlive && Environment.TickCount64 < deadline)
         {
             PumpFor(50);
+        }
+
+        if (worker.IsAlive)
+        {
+            Fail($"uia end-to-end: timed out after {UiaTimeoutMs} ms");
+            return true; // still running — leave the host window alive for it
         }
 
         if (failure is not null)
         {
             Fail("uia end-to-end: " + failure);
+            return false;
         }
-        else
+
+        // Final proof that the chain reported *our* control and not some other
+        // focused window: the caret must sit inside the RichEdit's screen rectangle.
+        var left = rects![0];
+        var top = rects[1];
+        if (left < editRect.Left || left > editRect.Right ||
+            top < editRect.Top || top > editRect.Bottom)
         {
-            Ok($"uia end-to-end: caret rect L={rects![0]:F0} T={rects[1]:F0} W={rects[2]:F0} H={rects[3]:F0}");
+            Fail($"uia end-to-end: caret ({left:F0},{top:F0}) is outside the test control " +
+                 $"[{editRect.Left},{editRect.Top}..{editRect.Right},{editRect.Bottom}] — " +
+                 "the chain reported a different window");
+            return false;
         }
+
+        Ok($"uia end-to-end: caret rect L={left:F0} T={top:F0} W={rects[2]:F0} H={rects[3]:F0} " +
+           $"(inside the test control)");
+        return false;
     }
+
+    private const int UiaTimeoutMs = 10_000;
 
     private sealed class SelfTestHostWindow : Win32Window
     {

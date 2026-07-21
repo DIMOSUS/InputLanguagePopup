@@ -214,6 +214,24 @@ internal static class Win32Ui
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SetFocus(IntPtr hWnd);
 
+    /// <summary>Focus window of the *calling* thread (used to verify the self-test setup).</summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetFocus();
+
+    // Windows refuses SetForegroundWindow from a process that does not already own
+    // the foreground; attaching to the foreground thread's input queue lifts that
+    // restriction long enough to focus the self-test window.
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out NativeMethods.RECT lpRect);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
