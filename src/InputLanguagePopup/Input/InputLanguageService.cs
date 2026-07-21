@@ -57,15 +57,22 @@ public sealed class InputLanguageService
     }
 
     /// <summary>
-    /// Pick the window whose thread actually owns the keyboard layout: for consoles
-    /// (CMD/PowerShell) the default IME window; for UWP hosts / Steam popups the
-    /// focused child control; otherwise the foreground window itself.
+    /// Pick the window whose thread actually owns the keyboard layout.
+    ///
+    /// The layout is per *thread*, and the thread that owns the top-level window is
+    /// not always the one receiving keystrokes. In hosted content — WebView2 (new
+    /// Microsoft Teams), UWP frames, Steam popups — the focused window belongs to a
+    /// different thread, often a different process, and only that thread tracks the
+    /// layout; the outer window's thread never sees keyboard input and keeps
+    /// reporting the default layout forever. So prefer the focus window reported by
+    /// GUITHREADINFO, which is where keystrokes actually go.
+    ///
+    /// Consoles are the one case that needs a different answer: there the layout
+    /// lives on the default IME window.
     /// </summary>
     private IntPtr ResolveLayoutWindow(IntPtr foregroundWindow)
     {
-        var className = GetClassName(foregroundWindow);
-
-        if (className == "ConsoleWindowClass")
+        if (GetClassName(foregroundWindow) == "ConsoleWindowClass")
         {
             var ime = ImmGetDefaultIMEWnd(foregroundWindow);
             if (ime != IntPtr.Zero)
@@ -73,18 +80,14 @@ public sealed class InputLanguageService
                 return ime;
             }
         }
-        else if (className is "ApplicationFrameWindow" or "vguiPopupWindow")
+
+        var tid = GetWindowThreadProcessId(foregroundWindow, out _);
+        if (tid != 0)
         {
-            // The real input lives in a focused child; GUITHREADINFO.hwndFocus of the
-            // foreground thread points at it.
-            var tid = GetWindowThreadProcessId(foregroundWindow, out _);
-            if (tid != 0)
+            var gti = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+            if (GetGUIThreadInfo(tid, ref gti) && gti.hwndFocus != IntPtr.Zero)
             {
-                var gti = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
-                if (GetGUIThreadInfo(tid, ref gti) && gti.hwndFocus != IntPtr.Zero)
-                {
-                    return gti.hwndFocus;
-                }
+                return gti.hwndFocus;
             }
         }
 
