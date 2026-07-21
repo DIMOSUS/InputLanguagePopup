@@ -28,6 +28,14 @@ internal static class SelfTest
     private static int _failures;
     private static StreamWriter? _writer;
 
+    /// <summary>
+    /// Keeps a timed-out host window (and therefore its window-procedure delegate)
+    /// reachable for the rest of the process. Without this managed root the object
+    /// graph is only host → delegate → host, which the GC can collect while the
+    /// native HWND still holds a pointer to the thunk.
+    /// </summary>
+    private static SelfTestHostWindow? _timedOutHost;
+
     public static void Run()
     {
         var dir = Path.Combine(
@@ -177,7 +185,13 @@ internal static class SelfTest
         }
         finally
         {
-            if (!keepHostAlive)
+            if (keepHostAlive)
+            {
+                // Root it so the GC cannot collect the window procedure delegate
+                // while a still-blocked worker (and the live HWND) may use it.
+                _timedOutHost = host;
+            }
+            else
             {
                 host.Dispose();
             }
@@ -320,10 +334,22 @@ internal static class SelfTest
             return false;
         }
 
-        // Final proof that the chain reported *our* control and not some other
-        // focused window: the caret must sit inside the RichEdit's screen rectangle.
+        // Validate before comparing: every comparison with NaN is false, so a NaN
+        // would silently sail through the bounds check below.
         var left = rects![0];
         var top = rects[1];
+        var width = rects[2];
+        var height = rects[3];
+        if (!double.IsFinite(left) || !double.IsFinite(top) ||
+            !double.IsFinite(width) || !double.IsFinite(height) ||
+            width < 0 || height <= 0)
+        {
+            Fail($"uia end-to-end: implausible caret rect L={left} T={top} W={width} H={height}");
+            return false;
+        }
+
+        // Final proof that the chain reported *our* control and not some other
+        // focused window: the caret must sit inside the RichEdit's screen rectangle.
         if (left < editRect.Left || left > editRect.Right ||
             top < editRect.Top || top > editRect.Bottom)
         {
@@ -333,7 +359,7 @@ internal static class SelfTest
             return false;
         }
 
-        Ok($"uia end-to-end: caret rect L={left:F0} T={top:F0} W={rects[2]:F0} H={rects[3]:F0} " +
+        Ok($"uia end-to-end: caret rect L={left:F0} T={top:F0} W={width:F0} H={height:F0} " +
            $"(inside the test control)");
         return false;
     }
