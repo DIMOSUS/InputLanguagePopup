@@ -1,7 +1,8 @@
+using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Windows.Forms;
-using Microsoft.Win32;
+using System.Threading;
+using System.Threading.Tasks;
 using InputLanguagePopup.Autostart;
 using InputLanguagePopup.Caret;
 using InputLanguagePopup.Diagnostics;
@@ -11,16 +12,22 @@ using InputLanguagePopup.Positioning;
 using InputLanguagePopup.Settings;
 using InputLanguagePopup.Ui;
 using static InputLanguagePopup.Interop.NativeMethods;
+using static InputLanguagePopup.Interop.Win32Ui;
 
 namespace InputLanguagePopup;
 
 /// <summary>
 /// The tray-hosted application root. Wires the services together, owns the
 /// timers and the popup lifecycle, and cleans everything up on exit. There is no
-/// main window.
+/// main window. Pure Win32 (no WinForms) so the app can be published Native AOT.
 /// </summary>
-public sealed class TrayApplicationContext : ApplicationContext
+public sealed class TrayApplication : IDisposable
 {
+    private const int MenuEnabled = 1;
+    private const int MenuTestPopup = 2;
+    private const int MenuStartup = 3;
+    private const int MenuExit = 4;
+
     private readonly Logger _logger;
     private readonly SettingsService _settingsService;
     private readonly AppSettings _settings;
@@ -32,13 +39,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly InputLanguageService _languageService;
     private readonly CaretLocator _caretLocator;
     private readonly PopupPositionService _positionService;
-    private readonly LanguagePopupForm _popupForm;
+    private readonly LanguagePopupWindow _popup;
     private readonly DpiProbeWindow _dpiProbe;
-
-    private readonly NotifyIcon _trayIcon;
-    private readonly ToolStripMenuItem _enabledItem;
-    private readonly ToolStripMenuItem _startupItem;
-    private IntPtr _trayIconHandle = IntPtr.Zero;
+    private readonly TrayWindow _tray;
 
     // Detection state (mutated only on the UI thread).
     private volatile int _requestId;
@@ -53,7 +56,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     // later on the UI thread, so the popup can size itself to the final text.
     private readonly record struct ProbeResult(string Code, CaretResult Caret, IntPtr Hwnd);
 
-    public TrayApplicationContext(Logger logger, SettingsService settingsService, AppSettings settings)
+    public TrayApplication(Logger logger, SettingsService settingsService, AppSettings settings)
     {
         _logger = logger;
         _settingsService = settingsService;
@@ -64,49 +67,25 @@ public sealed class TrayApplicationContext : ApplicationContext
         _languageService = new InputLanguageService(logger);
         _caretLocator = new CaretLocator(logger, settings);
         _positionService = new PopupPositionService(settings);
-        _popupForm = new LanguagePopupForm(logger);
+        _popup = new LanguagePopupWindow(logger);
         _dpiProbe = new DpiProbeWindow();
 
         _detector = new LayoutHotkeyGestureDetector();
         _detector.GestureRecognized += OnGestureRecognized;
 
+        _tray = new TrayWindow(logger, CreateTrayIcon(), "Input Language Popup");
+        _tray.ContextMenuRequested += OnContextMenuRequested;
+        // Lock / unlock, RDP connect/disconnect and fast-user-switch can swallow
+        // key-up events; clear gesture state so modifiers cannot get stuck. This
+        // arrives on the UI thread (window message), same as the hook callback.
+        _tray.SessionChanged += _detector.Reset;
+
         _hook = new GlobalKeyboardHook(logger);
         _hook.KeyDown += _detector.OnKeyDown;
         _hook.KeyUp += _detector.OnKeyUp;
 
-        // --- Tray icon + menu ---
-        _enabledItem = new ToolStripMenuItem("Enabled", null, OnToggleEnabled)
-        {
-            CheckOnClick = true,
-            Checked = _settings.Enabled,
-        };
-        _startupItem = new ToolStripMenuItem("Start with Windows", null, OnToggleStartup)
-        {
-            CheckOnClick = true,
-            Checked = _settings.StartWithWindows,
-        };
-
-        var menu = new ContextMenuStrip();
-        menu.Items.Add(_enabledItem);
-        menu.Items.Add(new ToolStripMenuItem("Show test popup", null, OnShowTestPopup));
-        menu.Items.Add(_startupItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Exit", null, OnExit));
-
-        _trayIcon = new NotifyIcon
-        {
-            Icon = CreateTrayIcon(out _trayIconHandle),
-            Text = "Input Language Popup",
-            Visible = true,
-            ContextMenuStrip = menu,
-        };
-
         // Keep the autostart registry entry in sync with the persisted setting.
         SyncStartupWithSetting();
-
-        // Lock / unlock, RDP connect/disconnect and fast-user-switch can swallow
-        // key-up events; clear gesture state so modifiers cannot get stuck.
-        SystemEvents.SessionSwitch += OnSessionSwitch;
 
         try
         {
@@ -115,43 +94,121 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             _logger.Error("Failed to install the keyboard hook at startup.", ex);
-            MessageBox.Show(
+            MessageBoxW(IntPtr.Zero,
                 "Failed to install the global keyboard hook. The indicator will not work.\n\n" + ex.Message,
-                "Input Language Popup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "Input Language Popup", MB_OK | MB_ICONWARNING);
         }
 
         _logger.Info("Application started.");
     }
 
-    // ---- Gesture handling ------------------------------------------------
+    // ---- Tray menu -------------------------------------------------------
 
-    // May run on a SystemEvents thread; marshal the reset onto the UI thread so it
-    // does not race the hook callback that also mutates the detector.
-    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    private void OnContextMenuRequested()
     {
-        if (_disposed)
+        // Built fresh each time, so the check marks always reflect the real state
+        // (including the actual autostart registry entry).
+        var items = new[]
         {
-            return;
-        }
+            new TrayMenuItem(MenuEnabled, "Enabled", _settings.Enabled),
+            new TrayMenuItem(MenuTestPopup, "Show test popup"),
+            new TrayMenuItem(MenuStartup, "Start with Windows", _startupService.IsEnabled()),
+            TrayMenuItem.Separator(),
+            new TrayMenuItem(MenuExit, "Exit"),
+        };
 
-        try
+        switch (_tray.ShowMenu(items))
         {
-            if (!_popupForm.IsDisposed)
-            {
-                _popupForm.BeginInvoke(new Action(_detector.Reset));
-            }
-        }
-        catch (InvalidOperationException)
-        {
-            // Form handle gone (shutting down) — ignore.
+            case MenuEnabled:
+                ToggleEnabled();
+                break;
+            case MenuTestPopup:
+                ShowTestPopup();
+                break;
+            case MenuStartup:
+                ToggleStartup();
+                break;
+            case MenuExit:
+                _logger.Info("Exit requested from tray menu.");
+                PostQuitMessage(0);
+                break;
         }
     }
 
-    // Raised from inside the WH_KEYBOARD_LL callback. Low-level hook callbacks run
-    // on the installing thread (our UI thread), so this is technically already the
-    // UI thread — but it is still *inside* the hook callback, which must return to
-    // CallNextHookEx immediately. BeginInvoke defers the real work to a later
-    // message-loop iteration.
+    private void ToggleEnabled()
+    {
+        _settings.Enabled = !_settings.Enabled;
+        _settingsService.Save(_settings);
+        _logger.Info($"Enabled set to {_settings.Enabled}.");
+
+        if (!_settings.Enabled)
+        {
+            // Cancel any probe already in flight so a delayed layout check cannot
+            // pop the indicator up after the user just turned it off.
+            try
+            {
+                _cts?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already disposed by a superseding request — nothing to cancel.
+            }
+
+            _popup.HidePopup();
+        }
+    }
+
+    private void ToggleStartup()
+    {
+        var desired = !_startupService.IsEnabled();
+
+        if (_startupService.SetEnabled(desired))
+        {
+            _settings.StartWithWindows = desired;
+        }
+        else
+        {
+            // The registry could not be updated (e.g. dev run under dotnet host).
+            // Reflect the real state instead of claiming success.
+            _settings.StartWithWindows = _startupService.IsEnabled();
+            MessageBoxW(IntPtr.Zero,
+                "Could not update the \"Start with Windows\" setting. See the log for details.",
+                "Input Language Popup", MB_OK | MB_ICONWARNING);
+        }
+
+        _settingsService.Save(_settings);
+    }
+
+    private void ShowTestPopup()
+    {
+        try
+        {
+            var hkl = _languageService.GetForegroundLayout(out _);
+            var code = _languageService.GetDisplayCode(hkl) ?? "EN";
+            var text = InputLanguageService.ComposeDisplayText(code, IsCapsLockOn());
+
+            if (!GetCursorPos(out var pt))
+            {
+                return;
+            }
+
+            var caret = new CaretResult(CaretSource.CursorFallback, new Rectangle(pt.X, pt.Y, 0, 0));
+            var dpiScale = _dpiProbe.GetScaleForPoint(PopupPositionService.GetAnchorPoint(caret));
+            var placement = _positionService.Compute(caret, LanguagePopupWindow.MeasureLogicalSize(text), dpiScale);
+            _popup.ShowPopup(text, placement, _settings.PopupDurationMs);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Test popup failed.", ex);
+        }
+    }
+
+    // ---- Gesture handling ------------------------------------------------
+
+    // Raised from inside the WH_KEYBOARD_LL callback, which runs on the installing
+    // (UI) thread — but still *inside* the hook callback, which must return to
+    // CallNextHookEx immediately. Post defers the real work (including the registry
+    // read in ShouldHandle) to a later message-loop iteration.
     private void OnGestureRecognized(LayoutGesture gesture)
     {
         if (_disposed)
@@ -159,17 +216,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        try
-        {
-            if (!_popupForm.IsDisposed)
-            {
-                _popupForm.BeginInvoke(new Action(() => StartDetection(gesture)));
-            }
-        }
-        catch (InvalidOperationException)
-        {
-            // The form handle is gone (shutting down) — ignore.
-        }
+        _tray.Post(() => StartDetection(gesture));
     }
 
     /// <summary>
@@ -194,8 +241,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
     }
 
-    // Runs on the UI thread (deferred out of the hook callback by BeginInvoke,
-    // so the registry read in ShouldHandle never runs inside the hook).
+    // Runs on the UI thread.
     private void StartDetection(LayoutGesture gesture)
     {
         if (_disposed || !_settings.Enabled || !ShouldHandle(gesture))
@@ -237,7 +283,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             // First check shortly after the chord (Windows may still be switching).
             await Task.Delay(_settings.FirstLayoutCheckDelayMs, token).ConfigureAwait(false);
-            await ProbeAndShowAsync(id, token, isSecond: false).ConfigureAwait(false);
+            ProbeAndShow(id, token, isSecond: false);
 
             var remaining = _settings.SecondLayoutCheckDelayMs - _settings.FirstLayoutCheckDelayMs;
             if (remaining > 0)
@@ -245,7 +291,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                 await Task.Delay(remaining, token).ConfigureAwait(false);
             }
 
-            await ProbeAndShowAsync(id, token, isSecond: true).ConfigureAwait(false);
+            ProbeAndShow(id, token, isSecond: true);
         }
         catch (OperationCanceledException)
         {
@@ -261,31 +307,18 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     // Runs on a thread-pool thread (ConfigureAwait(false) above).
-    private Task ProbeAndShowAsync(int id, CancellationToken token, bool isSecond)
+    private void ProbeAndShow(int id, CancellationToken token, bool isSecond)
     {
         token.ThrowIfCancellationRequested();
 
         var probe = Probe();
-        if (probe is null || token.IsCancellationRequested)
+        if (probe is null || token.IsCancellationRequested || _disposed)
         {
-            return Task.CompletedTask;
+            return;
         }
 
-        if (_popupForm.IsDisposed)
-        {
-            return Task.CompletedTask;
-        }
-
-        try
-        {
-            _popupForm.BeginInvoke(new Action(() => ShowOnUi(id, probe.Value, isSecond)));
-        }
-        catch (InvalidOperationException)
-        {
-            // Form handle gone.
-        }
-
-        return Task.CompletedTask;
+        var result = probe.Value;
+        _tray.Post(() => ShowOnUi(id, result, isSecond));
     }
 
     private ProbeResult? Probe()
@@ -338,7 +371,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         var text = InputLanguageService.ComposeDisplayText(probe.Code, IsCapsLockOn());
-        var logicalSize = LanguagePopupForm.MeasureLogicalSize(text);
+        var logicalSize = LanguagePopupWindow.MeasureLogicalSize(text);
         var dpiScale = _dpiProbe.GetScaleForPoint(PopupPositionService.GetAnchorPoint(probe.Caret));
         var placement = _positionService.Compute(probe.Caret, logicalSize, dpiScale);
 
@@ -352,88 +385,10 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        _popupForm.ShowPopup(text, placement, _settings.PopupDurationMs);
+        _popup.ShowPopup(text, placement, _settings.PopupDurationMs);
         _lastShownRequestId = id;
         _lastShownText = text;
         _lastPlacement = placement;
-    }
-
-    // ---- Tray menu handlers ---------------------------------------------
-
-    private void OnToggleEnabled(object? sender, EventArgs e)
-    {
-        _settings.Enabled = _enabledItem.Checked;
-        _settingsService.Save(_settings);
-        _logger.Info($"Enabled set to {_settings.Enabled}.");
-
-        if (!_settings.Enabled)
-        {
-            // Cancel any probe already in flight so a delayed layout check cannot
-            // pop the indicator up after the user just turned it off.
-            try
-            {
-                _cts?.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already disposed by a superseding request — nothing to cancel.
-            }
-
-            _popupForm.HidePopup();
-        }
-    }
-
-    private void OnToggleStartup(object? sender, EventArgs e)
-    {
-        var desired = _startupItem.Checked;
-
-        if (_startupService.SetEnabled(desired))
-        {
-            _settings.StartWithWindows = desired;
-        }
-        else
-        {
-            // The registry could not be updated (e.g. dev run under dotnet host).
-            // Reflect the real state instead of claiming success.
-            var actual = _startupService.IsEnabled();
-            _startupItem.Checked = actual;
-            _settings.StartWithWindows = actual;
-            MessageBox.Show(
-                "Could not update the \"Start with Windows\" setting. See the log for details.",
-                "Input Language Popup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-
-        _settingsService.Save(_settings);
-    }
-
-    private void OnShowTestPopup(object? sender, EventArgs e)
-    {
-        try
-        {
-            var hkl = _languageService.GetForegroundLayout(out _);
-            var code = _languageService.GetDisplayCode(hkl) ?? "EN";
-            var text = InputLanguageService.ComposeDisplayText(code, IsCapsLockOn());
-
-            if (!GetCursorPos(out var pt))
-            {
-                return;
-            }
-
-            var caret = new CaretResult(CaretSource.CursorFallback, new Rectangle(pt.X, pt.Y, 0, 0));
-            var dpiScale = _dpiProbe.GetScaleForPoint(PopupPositionService.GetAnchorPoint(caret));
-            var placement = _positionService.Compute(caret, LanguagePopupForm.MeasureLogicalSize(text), dpiScale);
-            _popupForm.ShowPopup(text, placement, _settings.PopupDurationMs);
-        }
-        catch (Exception ex)
-        {
-            _logger.Error("Test popup failed.", ex);
-        }
-    }
-
-    private void OnExit(object? sender, EventArgs e)
-    {
-        _logger.Info("Exit requested from tray menu.");
-        ExitThread();
     }
 
     // ---- Startup sync ----------------------------------------------------
@@ -451,7 +406,8 @@ public sealed class TrayApplicationContext : ApplicationContext
                 {
                     // Could not register (e.g. running under the dotnet host during
                     // development, or a registry error). Do not clobber the persisted
-                    // intent, but do not claim success either.
+                    // intent, but do not claim success either — the tray menu reads
+                    // the real registry state when it is built.
                     _logger.Warn("Autostart is requested but could not be registered right now.");
                 }
             }
@@ -464,24 +420,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _logger.Error("Failed to reconcile autostart setting.", ex);
         }
-        finally
-        {
-            // Show the tray checkbox as the *actual* registry state, so the UI never
-            // claims autostart is on when the entry is absent.
-            try
-            {
-                _startupItem.Checked = _startupService.IsEnabled();
-            }
-            catch
-            {
-                // ignore
-            }
-        }
     }
 
     // ---- Tray icon rendering --------------------------------------------
 
-    private static Icon CreateTrayIcon(out IntPtr iconHandle)
+    /// <summary>Draw the tray icon and return a raw HICON (owned by the tray window).</summary>
+    private static IntPtr CreateTrayIcon()
     {
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
@@ -502,56 +446,42 @@ public sealed class TrayApplicationContext : ApplicationContext
             g.DrawString("AЯ", font, textBrush, new RectangleF(0, 0, 32, 32), fmt);
         }
 
-        iconHandle = bmp.GetHicon();
-        // Clone into a managed icon so we can free the native handle immediately... but
-        // Icon.FromHandle does not own the handle. Keep the handle and free it on dispose.
-        return (Icon)Icon.FromHandle(iconHandle).Clone();
+        return bmp.GetHicon();
     }
 
     // ---- Cleanup ---------------------------------------------------------
 
-    protected override void Dispose(bool disposing)
+    public void Dispose()
     {
-        if (!_disposed && disposing)
+        if (_disposed)
         {
-            _disposed = true;
-            _logger.Info("Application shutting down.");
-
-            SystemEvents.SessionSwitch -= OnSessionSwitch;
-
-            try
-            {
-                _cts?.Cancel();
-                _cts?.Dispose();
-            }
-            catch
-            {
-                // ignore
-            }
-
-            _hook.KeyDown -= _detector.OnKeyDown;
-            _hook.KeyUp -= _detector.OnKeyUp;
-            _hook.Dispose();
-
-            _caretLocator.Dispose();
-            _dpiProbe.Dispose();
-
-            _trayIcon.Visible = false;
-            _trayIcon.Icon?.Dispose();
-            _trayIcon.ContextMenuStrip?.Dispose();
-            _trayIcon.Dispose();
-
-            if (_trayIconHandle != IntPtr.Zero)
-            {
-                DestroyIcon(_trayIconHandle);
-                _trayIconHandle = IntPtr.Zero;
-            }
-
-            _popupForm.Dispose();
-            _logger.Info("Application stopped.");
-            _logger.Dispose();
+            return;
         }
 
-        base.Dispose(disposing);
+        _disposed = true;
+        _logger.Info("Application shutting down.");
+
+        try
+        {
+            _cts?.Cancel();
+            _cts?.Dispose();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        _hook.KeyDown -= _detector.OnKeyDown;
+        _hook.KeyUp -= _detector.OnKeyUp;
+        _hook.Dispose();
+
+        _caretLocator.Dispose();
+
+        _tray.Dispose();   // removes the tray icon and destroys the HICON
+        _popup.Dispose();
+        _dpiProbe.Dispose();
+
+        _logger.Info("Application stopped.");
+        _logger.Dispose();
     }
 }

@@ -3,12 +3,9 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
-    <!-- COM UI Automation is used via hand-written interop (see Interop/UiaComInterop.cs)
-         because the managed System.Windows.Automation port on .NET does not expose
-         TextPattern2.GetCaretRange. COM interop must be allowed. -->
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
-    <EnableComHosting>false</EnableComHosting>
+    <!-- No WinForms/WPF: the UI is hand-rolled Win32 so the app can be published
+         with Native AOT (WinForms is not AOT/trim compatible). Rendering still uses
+         System.Drawing, which is AOT-compatible. -->
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
@@ -17,11 +14,21 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <PlatformTarget>x64</PlatformTarget>
     <Deterministic>true</Deterministic>
-    <!-- DPI awareness is declared in app.manifest (Per-Monitor V2). Suppress the
-         WinForms analyzer that prefers the API-based approach; both are valid and
-         the spec asks for a manifest. -->
-    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+    <!-- Raw COM vtable calls via function pointers (Native AOT has no built-in COM). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Native AOT -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- CultureInfo(LANGID) is needed to map an HKL to an ISO language code. -->
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <StackTraceSupport>true</StackTraceSupport>
+    <TrimMode>full</TrimMode>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
 
   <!-- Expose internal, Win32-free helpers (InterpretCodes, ComputeLocation) to the
        test project so their pure logic can be unit tested. -->

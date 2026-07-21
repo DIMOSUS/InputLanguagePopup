@@ -42,9 +42,21 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Publishing version $version"
 
-      - name: Publish single-file self-contained x64
+      - name: Publish Native AOT x64
         run: ./publish.ps1 -Version ${{ steps.ver.outputs.version }}
         shell: pwsh
+
+      - name: Verify the published binary (self-test)
+        shell: pwsh
+        run: |
+          & ./publish/InputLanguagePopup.exe --selftest
+          Start-Sleep -Seconds 3
+          $log = Join-Path $env:LOCALAPPDATA 'InputLanguagePopup\selftest.log'
+          if (-not (Test-Path $log)) { throw 'Self-test produced no log.' }
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern 'SELFTEST PASSED' -Quiet)) {
+            throw 'Self-test did not pass.'
+          }
 
       - name: Name the release asset
         id: asset

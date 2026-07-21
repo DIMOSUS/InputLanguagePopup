@@ -34,17 +34,17 @@ public sealed class MsaaCaretLocator : ICaretPositionSource
         // top-level foreground window — query the caret/focus window of the thread.
         var target = ResolveCaretWindow(foregroundWindow, threadId);
 
-        IAccessible? caret = null;
+        var caret = IntPtr.Zero;
         try
         {
-            var iid = Msaa.IID_IAccessible;
-            var hr = Msaa.AccessibleObjectFromWindow(target, Msaa.OBJID_CARET, ref iid, out caret);
-            if (hr != 0 || caret is null)
+            caret = Msaa.GetCaretObject(target);
+            if (caret == IntPtr.Zero)
             {
                 return CaretResult.NotFound;
             }
 
-            if (caret.accLocation(out var x, out var y, out var w, out var h, Msaa.CHILDID_SELF) != 0)
+            // S_FALSE (1) means "no caret location", so require S_OK exactly.
+            if (Msaa.AccLocation(caret, out var x, out var y, out var w, out var h) != 0)
             {
                 return CaretResult.NotFound;
             }
@@ -75,10 +75,7 @@ public sealed class MsaaCaretLocator : ICaretPositionSource
         }
         finally
         {
-            if (caret is not null && Marshal.IsComObject(caret))
-            {
-                Marshal.ReleaseComObject(caret);
-            }
+            Com.Release(caret);
         }
     }
 

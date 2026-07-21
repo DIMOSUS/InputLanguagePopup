@@ -12,15 +12,6 @@ namespace InputLanguagePopup.Settings;
 /// </summary>
 public sealed class SettingsService
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        // camelCase on disk (matches the documented schema); case-insensitive
-        // reading also accepts hand-edited or legacy PascalCase files.
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-    };
-
     private readonly string _settingsPath;
     private readonly Logger _logger;
 
@@ -46,7 +37,7 @@ public sealed class SettingsService
             }
 
             var json = File.ReadAllText(_settingsPath);
-            var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize(json, SettingsJsonContext.Default.AppSettings) ?? new AppSettings();
             settings.Normalize();
 
             // Re-save so fields added in newer versions appear in the file with
@@ -93,7 +84,7 @@ public sealed class SettingsService
         try
         {
             settings.Normalize();
-            var json = JsonSerializer.Serialize(settings, JsonOptions);
+            var json = JsonSerializer.Serialize(settings, SettingsJsonContext.Default.AppSettings);
             File.WriteAllText(_settingsPath, json);
         }
         catch (Exception ex)

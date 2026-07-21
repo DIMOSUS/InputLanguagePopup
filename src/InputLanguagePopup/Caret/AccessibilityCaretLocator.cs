@@ -51,8 +51,8 @@ public sealed class AccessibilityCaretLocator : IDisposable
     private uint _tid;
     private bool _useUia;
 
-    // UIA COM object — worker-thread only.
-    private IUIAutomation? _automation;
+    // UIA COM object (raw pointer) — worker-thread only.
+    private IntPtr _automation;
 
     public AccessibilityCaretLocator(Logger logger, int timeoutMs = 150, Func<long>? tickProvider = null)
     {
@@ -164,31 +164,39 @@ public sealed class AccessibilityCaretLocator : IDisposable
 
     private CaretResult LocateViaUia()
     {
-        IUIAutomationElement? element = null;
-        IUIAutomationTextPattern2? textPattern = null;
-        IUIAutomationTextRange? range = null;
+        var element = IntPtr.Zero;
+        var textPattern = IntPtr.Zero;
+        var range = IntPtr.Zero;
 
         try
         {
-            _automation ??= (IUIAutomation)new CUIAutomation();
+            if (_automation == IntPtr.Zero)
+            {
+                _automation = Uia.CreateAutomation();
+            }
 
-            if (_automation.GetFocusedElement(out element) < 0 || element is null)
+            if (_automation == IntPtr.Zero)
+            {
+                return CaretResult.NotFound;
+            }
+
+            if (Uia.GetFocusedElement(_automation, out element) < 0 || element == IntPtr.Zero)
             {
                 return CaretResult.NotFound;
             }
 
             var iid = Uia.IID_IUIAutomationTextPattern2;
-            if (element.GetCurrentPatternAs(Uia.UIA_TextPattern2Id, ref iid, out textPattern) < 0 ||
-                textPattern is null)
+            if (Uia.GetCurrentPatternAs(element, Uia.UIA_TextPattern2Id, ref iid, out textPattern) < 0 ||
+                textPattern == IntPtr.Zero)
             {
                 return CaretResult.NotFound;
             }
 
-            // isActive == 0 means the range is a last-known / inactive caret, which
+            // isActive == false means the range is a last-known / inactive caret, which
             // could place the popup at a stale position — prefer the cursor fallback.
-            if (textPattern.GetCaretRange(out var isActive, out range) < 0 ||
-                isActive == 0 ||
-                range is null)
+            if (Uia.GetCaretRange(textPattern, out var isActive, out range) < 0 ||
+                !isActive ||
+                range == IntPtr.Zero)
             {
                 return CaretResult.NotFound;
             }
@@ -201,7 +209,7 @@ public sealed class AccessibilityCaretLocator : IDisposable
 
             // A collapsed caret range can produce no bounding rectangle in some
             // providers. Expand it to a single character and try again.
-            if (range.ExpandToEnclosingUnit(TextUnit_Character) >= 0)
+            if (Uia.ExpandToEnclosingUnit(range, TextUnit_Character) >= 0)
             {
                 result = RectsFromRange(range);
             }
@@ -215,20 +223,16 @@ public sealed class AccessibilityCaretLocator : IDisposable
         }
         finally
         {
-            Release(range);
-            Release(textPattern);
-            Release(element);
+            Com.Release(range);
+            Com.Release(textPattern);
+            Com.Release(element);
         }
     }
 
-    private static CaretResult RectsFromRange(IUIAutomationTextRange range)
+    private static CaretResult RectsFromRange(IntPtr range)
     {
-        if (range.GetBoundingRectangles(out var rects) < 0 || rects is null)
-        {
-            return CaretResult.NotFound;
-        }
-
-        return ParseFirstRect(rects);
+        var rects = Uia.GetBoundingRectangles(range);
+        return rects is null ? CaretResult.NotFound : ParseFirstRect(rects);
     }
 
     // No real screen coordinate approaches this; larger values are a broken provider
@@ -270,14 +274,6 @@ public sealed class AccessibilityCaretLocator : IDisposable
         return CaretResult.NotFound;
     }
 
-    private static void Release(object? comObject)
-    {
-        if (comObject is not null && Marshal.IsComObject(comObject))
-        {
-            Marshal.ReleaseComObject(comObject);
-        }
-    }
-
     private void WorkerLoop()
     {
         try
@@ -306,8 +302,8 @@ public sealed class AccessibilityCaretLocator : IDisposable
         }
         finally
         {
-            Release(_automation);
-            _automation = null;
+            Com.Release(_automation);
+            _automation = IntPtr.Zero;
         }
     }
 

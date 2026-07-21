@@ -34,7 +34,10 @@ layered popup near the caret (or the mouse cursor).
 
 | Component | Responsibility |
 | --------- | -------------- |
-| `Program` | Entry point, single-instance mutex, high-DPI mode, global exception handlers. |
+| `Program` | Entry point, single-instance mutex, global exception handler, and the Win32 message loop (`GetMessage`/`TranslateMessage`/`DispatchMessage`). Also dispatches `--selftest`. |
+| `Win32Window` | Base class owning a registered window class + HWND and keeping the `WndProc` delegate alive (replaces WinForms' `Form`/`NativeWindow`). |
+| `TrayWindow` | Hidden window that owns the tray icon (`Shell_NotifyIcon`), shows the context menu (`TrackPopupMenu`), relays session changes (`WM_WTSSESSION_CHANGE`), and runs work posted from other threads (`Post` → `WM_APP_INVOKE`, the replacement for `Control.BeginInvoke`). |
+| `SelfTest` | `--selftest` diagnostic: exercises settings, layout, hotkeys, the COM caret chain, DPI probe and the layered popup, writing `selftest.log`. Used as a release gate. |
 | `TrayApplicationContext` | Wires services together; owns the tray icon/menu, timers, request lifecycle, and cleanup. The only place with orchestration logic. |
 | `GlobalKeyboardHook` | Installs/removes `WH_KEYBOARD_LL`; converts native events into `KeyDown`/`KeyUp`. **Never suppresses** keys; no business logic. |
 | `LayoutHotkeyGestureDetector` | Pure, Win32-independent state machine that recognises the layout-switch gestures: clean `Ctrl+Shift` / `Alt+Shift` chords and `Win+Space` (incl. `Win+Shift+Space`). Reports *which* gesture completed; auto-discards state older than 10 s. Fully unit-tested. |
@@ -146,8 +149,9 @@ and the just-processed gesture keeps it fresh — so no separate state tracking 
 **System caret** (`user32`)
 `GetGUIThreadInfo` (`GUITHREADINFO`, `hwndCaret`, `rcCaret`), `ClientToScreen`.
 
-**MSAA caret** (`oleacc`, hand-written COM interop)
-`AccessibleObjectFromWindow(OBJID_CARET)` → `IAccessible::accLocation` (vtable slot 22).
+**MSAA caret** (`oleacc`, raw vtable call)
+`AccessibleObjectFromWindow(OBJID_CARET)` → `IAccessible::accLocation` (slot 22, with a
+by-value `VARIANT` for `CHILDID_SELF`).
 
 **Mouse fallback** (`user32`) `GetCursorPos`.
 
@@ -160,11 +164,19 @@ popup's own Per-Monitor-V2 window).
 (`SWP_NOACTIVATE`/`SWP_SHOWWINDOW`/`SWP_HIDEWINDOW`), `GetDC`/`ReleaseDC`,
 `CreateCompatibleDC`/`DeleteDC`, `SelectObject`, `DeleteObject`, `DestroyIcon`.
 
-**UI Automation (COM interop, hand-written)** — CLSID `CUIAutomation`, interfaces
-`IUIAutomation::GetFocusedElement`, `IUIAutomationElement::GetCurrentPatternAs`,
-`IUIAutomationTextPattern2::GetCaretRange`, `IUIAutomationTextRange::GetBoundingRectangles`
-and `::ExpandToEnclosingUnit`. (The managed `System.Windows.Automation` port on .NET does
-**not** expose `TextPattern2`, so the COM API is used directly.)
+**UI Automation (COM, raw vtable calls)** — `CoCreateInstance(CLSID_CUIAutomation)` then
+`IUIAutomation::GetFocusedElement` (slot 5), `IUIAutomationElement::GetCurrentPatternAs`
+(11), `IUIAutomationTextPattern2::GetCaretRange` (7), `IUIAutomationTextRange::
+ExpandToEnclosingUnit` (3) / `GetBoundingRectangles` (7) + `SafeArray*` to read the
+result. (The managed `System.Windows.Automation` port does **not** expose `TextPattern2`;
+and Native AOT has no built-in COM interop, so every call is an indirect call on the
+object's vtable via a function pointer — no RCWs.)
+
+**Win32 UI** (`user32`, `shell32`, `wtsapi32`)
+`RegisterClassEx`/`CreateWindowEx`/`DefWindowProc`, `GetMessage`/`TranslateMessage`/
+`DispatchMessage`/`PostQuitMessage`/`PostMessage`, `Shell_NotifyIcon`,
+`CreatePopupMenu`/`AppendMenu`/`TrackPopupMenuEx`, `SetTimer`/`KillTimer`,
+`WTSRegisterSessionNotification`, `MessageBoxW`.
 
 **Autostart** (BCL) `Microsoft.Win32.Registry` — `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
@@ -215,8 +227,11 @@ desktop session (recommended check for the user).
 * The app launches, installs the hook, writes logs, creates the correct camelCase
   `settings.json`, and **recovers from a corrupt settings file** (quarantines it and writes
   defaults — verified live); force-stop leaves a clean state.
-* **Self-contained single-file x64 publish** succeeds (~50 MB `.exe`) and the published
-  binary launches and installs the hook.
+* **Native AOT x64 publish** succeeds (**~3 MB** native `.exe`, down from ~50 MB) and the
+  published binary passes `--selftest`: settings (source-generated JSON), layout +
+  `CultureInfo`, registry hotkeys, CapsLock, the **MSAA and UI Automation COM chain via
+  raw vtable calls**, the DPI probe, `System.Drawing` rendering, the layered popup, and
+  the message loop/timers.
 * The hand-written **COM UI Automation** caret path returns real caret coordinates
   (validated end-to-end against a focused rich-text control), confirming the vtable
   offsets are correct.

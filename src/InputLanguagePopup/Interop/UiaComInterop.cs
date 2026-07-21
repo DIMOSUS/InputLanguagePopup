@@ -4,115 +4,176 @@ using System.Runtime.InteropServices;
 namespace InputLanguagePopup.Interop;
 
 /// <summary>
-/// Minimal hand-written COM interop for the UI Automation client, exposing only
-/// the vtable slots needed to reach TextPattern2.GetCaretRange. Unused preceding
-/// slots are reserved with placeholder methods so the vtable indices line up with
-/// the native interfaces; those placeholders must never be called.
+/// Raw COM helpers: call interface methods through the object's vtable with
+/// function pointers instead of RCWs.
+///
+/// Native AOT has no built-in COM interop — creating an RCW throws
+/// <c>InvalidOperation_ComInteropRequireComWrapperInstance</c> — so every COM call
+/// here is a direct indirect call on the vtable slot. This is also immune to the
+/// trimming hazard that <c>[ComImport]</c> placeholder slots had.
 /// </summary>
-internal static class Uia
+internal static unsafe class Com
 {
-    // Pattern id for TextPattern2.
+    /// <summary>Address of the given vtable slot of a COM object.</summary>
+    public static IntPtr Slot(IntPtr obj, int index) => (*(IntPtr**)obj)[index];
+
+    /// <summary>IUnknown::Release (vtable slot 2). Safe to call with a null pointer.</summary>
+    public static void Release(IntPtr obj)
+    {
+        if (obj != IntPtr.Zero)
+        {
+            ((delegate* unmanaged[Stdcall]<IntPtr, uint>)Slot(obj, 2))(obj);
+        }
+    }
+}
+
+/// <summary>
+/// UI Automation client, reached entirely through raw vtable calls.
+/// Slot indices are 0-based including the three IUnknown entries.
+/// </summary>
+internal static unsafe class Uia
+{
     public const int UIA_TextPattern2Id = 10024;
 
     public static readonly Guid IID_IUIAutomationTextPattern2 =
         new("506A921A-FCC9-409F-B23B-37EB74106872");
-}
 
-/// <summary>The CUIAutomation coclass — <c>new CUIAutomation()</c> issues CoCreateInstance.</summary>
-[ComImport]
-[Guid("ff48dba4-60ef-4201-aa87-54103eef594e")]
-internal class CUIAutomation
-{
-}
+    private static Guid _clsidCUIAutomation = new("ff48dba4-60ef-4201-aa87-54103eef594e");
+    private static Guid _iidIUIAutomation = new("30cbe57d-d9d0-452a-ab13-7ac5ac4825ee");
 
-[ComImport]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-[Guid("30cbe57d-d9d0-452a-ab13-7ac5ac4825ee")]
-internal interface IUIAutomation
-{
-    // Slots 0-4: CompareElements, CompareRuntimeIds, GetRootElement,
-    //            ElementFromHandle, ElementFromPoint.
-    [PreserveSig] int _slot00();
-    [PreserveSig] int _slot01();
-    [PreserveSig] int _slot02();
-    [PreserveSig] int _slot03();
-    [PreserveSig] int _slot04();
+    private const uint CLSCTX_INPROC_SERVER = 1;
 
-    // Slot 5: GetFocusedElement.
-    [PreserveSig]
-    int GetFocusedElement([MarshalAs(UnmanagedType.Interface)] out IUIAutomationElement? element);
-}
+    // IUIAutomation: CompareElements, CompareRuntimeIds, GetRootElement,
+    // ElementFromHandle, ElementFromPoint, [5] GetFocusedElement.
+    private const int SlotGetFocusedElement = 5;
 
-[ComImport]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-[Guid("d22108aa-8ac5-49a5-837b-37bbb3d7591e")]
-internal interface IUIAutomationElement
-{
-    // Slots 0-10: SetFocus, GetRuntimeId, FindFirst, FindAll, FindFirstBuildCache,
-    //             FindAllBuildCache, BuildUpdatedCache, GetCurrentPropertyValue,
-    //             GetCurrentPropertyValueEx, GetCachedPropertyValue,
-    //             GetCachedPropertyValueEx.
-    [PreserveSig] int _slot00();
-    [PreserveSig] int _slot01();
-    [PreserveSig] int _slot02();
-    [PreserveSig] int _slot03();
-    [PreserveSig] int _slot04();
-    [PreserveSig] int _slot05();
-    [PreserveSig] int _slot06();
-    [PreserveSig] int _slot07();
-    [PreserveSig] int _slot08();
-    [PreserveSig] int _slot09();
-    [PreserveSig] int _slot10();
+    // IUIAutomationElement: ... [11] GetCurrentPatternAs.
+    private const int SlotGetCurrentPatternAs = 11;
 
-    // Slot 11: GetCurrentPatternAs(patternId, riid, out pattern).
-    [PreserveSig]
-    int GetCurrentPatternAs(
-        int patternId,
-        [In] ref Guid riid,
-        [MarshalAs(UnmanagedType.Interface)] out IUIAutomationTextPattern2? patternObject);
-}
+    // IUIAutomationTextPattern2 (TextPattern's 6 methods + RangeFromAnnotation):
+    // [7] GetCaretRange.
+    private const int SlotGetCaretRange = 7;
 
-[ComImport]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-[Guid("506A921A-FCC9-409F-B23B-37EB74106872")]
-internal interface IUIAutomationTextPattern2
-{
-    // Slots 0-6: (TextPattern) RangeFromPoint, RangeFromChild, GetSelection,
-    //            GetVisibleRanges, get_DocumentRange, get_SupportedTextSelection;
-    //            (TextPattern2) RangeFromAnnotation.
-    [PreserveSig] int _slot00();
-    [PreserveSig] int _slot01();
-    [PreserveSig] int _slot02();
-    [PreserveSig] int _slot03();
-    [PreserveSig] int _slot04();
-    [PreserveSig] int _slot05();
-    [PreserveSig] int _slot06();
+    // IUIAutomationTextRange: [3] ExpandToEnclosingUnit, [7] GetBoundingRectangles.
+    private const int SlotExpandToEnclosingUnit = 3;
+    private const int SlotGetBoundingRectangles = 7;
 
-    // Slot 7: GetCaretRange(out isActive, out range).
-    [PreserveSig]
-    int GetCaretRange(out int isActive, [MarshalAs(UnmanagedType.Interface)] out IUIAutomationTextRange? range);
-}
+    [DllImport("ole32.dll")]
+    private static extern int CoCreateInstance(
+        ref Guid rclsid, IntPtr pUnkOuter, uint dwClsContext, ref Guid riid, out IntPtr ppv);
 
-[ComImport]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-[Guid("A543CC6A-F4AE-494B-8239-C814481187A8")]
-internal interface IUIAutomationTextRange
-{
-    // Slots 0-2: Clone, Compare, CompareEndpoints.
-    [PreserveSig] int _slot00();
-    [PreserveSig] int _slot01();
-    [PreserveSig] int _slot02();
+    /// <summary>Create the UI Automation client; returns null pointer on failure.</summary>
+    public static IntPtr CreateAutomation()
+    {
+        var hr = CoCreateInstance(ref _clsidCUIAutomation, IntPtr.Zero, CLSCTX_INPROC_SERVER,
+            ref _iidIUIAutomation, out var automation);
+        return hr >= 0 ? automation : IntPtr.Zero;
+    }
 
-    // Slot 3: ExpandToEnclosingUnit(TextUnit). TextUnit_Character = 0.
-    [PreserveSig] int ExpandToEnclosingUnit(int textUnit);
+    public static int GetFocusedElement(IntPtr automation, out IntPtr element)
+    {
+        IntPtr result;
+        var hr = ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)
+            Com.Slot(automation, SlotGetFocusedElement))(automation, &result);
+        element = hr >= 0 ? result : IntPtr.Zero;
+        return hr;
+    }
 
-    // Slots 4-6: FindAttribute, FindText, GetAttributeValue.
-    [PreserveSig] int _slot04();
-    [PreserveSig] int _slot05();
-    [PreserveSig] int _slot06();
+    public static int GetCurrentPatternAs(IntPtr element, int patternId, ref Guid riid, out IntPtr pattern)
+    {
+        IntPtr result;
+        fixed (Guid* pIid = &riid)
+        {
+            var hr = ((delegate* unmanaged[Stdcall]<IntPtr, int, Guid*, IntPtr*, int>)
+                Com.Slot(element, SlotGetCurrentPatternAs))(element, patternId, pIid, &result);
+            pattern = hr >= 0 ? result : IntPtr.Zero;
+            return hr;
+        }
+    }
 
-    // Slot 7: GetBoundingRectangles -> SAFEARRAY(double) [L,T,W,H, L,T,W,H, ...].
-    [PreserveSig]
-    int GetBoundingRectangles(
-        [MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_R8)] out double[]? rects);
+    public static int GetCaretRange(IntPtr textPattern, out bool isActive, out IntPtr range)
+    {
+        int active;
+        IntPtr result;
+        var hr = ((delegate* unmanaged[Stdcall]<IntPtr, int*, IntPtr*, int>)
+            Com.Slot(textPattern, SlotGetCaretRange))(textPattern, &active, &result);
+        isActive = hr >= 0 && active != 0;
+        range = hr >= 0 ? result : IntPtr.Zero;
+        return hr;
+    }
+
+    public static int ExpandToEnclosingUnit(IntPtr range, int textUnit)
+        => ((delegate* unmanaged[Stdcall]<IntPtr, int, int>)
+            Com.Slot(range, SlotExpandToEnclosingUnit))(range, textUnit);
+
+    /// <summary>
+    /// GetBoundingRectangles → SAFEARRAY of doubles [L,T,W,H, ...]. The SAFEARRAY is
+    /// read and destroyed here; returns null when unavailable.
+    /// </summary>
+    public static double[]? GetBoundingRectangles(IntPtr range)
+    {
+        IntPtr psa;
+        var hr = ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)
+            Com.Slot(range, SlotGetBoundingRectangles))(range, &psa);
+
+        if (hr < 0 || psa == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (SafeArrayGetLBound(psa, 1, out var lbound) < 0 ||
+                SafeArrayGetUBound(psa, 1, out var ubound) < 0)
+            {
+                return null;
+            }
+
+            var count = ubound - lbound + 1;
+            if (count <= 0)
+            {
+                return null;
+            }
+
+            if (SafeArrayAccessData(psa, out var data) < 0 || data == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            try
+            {
+                var values = new double[count];
+                var src = (double*)data;
+                for (var i = 0; i < count; i++)
+                {
+                    values[i] = src[i];
+                }
+
+                return values;
+            }
+            finally
+            {
+                SafeArrayUnaccessData(psa);
+            }
+        }
+        finally
+        {
+            SafeArrayDestroy(psa);
+        }
+    }
+
+    [DllImport("oleaut32.dll")]
+    private static extern int SafeArrayGetLBound(IntPtr psa, uint nDim, out int lbound);
+
+    [DllImport("oleaut32.dll")]
+    private static extern int SafeArrayGetUBound(IntPtr psa, uint nDim, out int ubound);
+
+    [DllImport("oleaut32.dll")]
+    private static extern int SafeArrayAccessData(IntPtr psa, out IntPtr ppvData);
+
+    [DllImport("oleaut32.dll")]
+    private static extern int SafeArrayUnaccessData(IntPtr psa);
+
+    [DllImport("oleaut32.dll")]
+    private static extern int SafeArrayDestroy(IntPtr psa);
 }

@@ -7,67 +7,63 @@ namespace InputLanguagePopup.Interop;
 /// Minimal MSAA (oleacc) interop for reading the system caret via
 /// <c>AccessibleObjectFromWindow(OBJID_CARET)</c> + <c>IAccessible::accLocation</c>.
 ///
-/// Only <c>accLocation</c> is needed; the preceding vtable slots (IDispatch's four
-/// plus the IAccessible getters before <c>accLocation</c>) are reserved with
-/// placeholders so the index lines up — those placeholders must never be called.
+/// Like the UI Automation interop, this uses raw vtable calls rather than an RCW,
+/// because Native AOT has no built-in COM interop.
 /// </summary>
-internal static class Msaa
+internal static unsafe class Msaa
 {
     public const uint OBJID_CARET = 0xFFFFFFF8;
-    public const int CHILDID_SELF = 0;
 
-    public static readonly Guid IID_IAccessible = new("618736E0-3C3D-11CF-810C-00AA00389B71");
+    // IAccessible vtable: IUnknown (0-2), IDispatch (3-6), then the IAccessible
+    // members; accLocation is the 16th IAccessible member → slot 22.
+    private const int SlotAccLocation = 22;
+
+    private const ushort VT_I4 = 3;
+
+    private static Guid _iidIAccessible = new("618736E0-3C3D-11CF-810C-00AA00389B71");
+
+    /// <summary>VARIANT (24 bytes on x64) — only VT_I4 is needed for CHILDID_SELF.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct VARIANT
+    {
+        public ushort vt;
+        public ushort reserved1;
+        public ushort reserved2;
+        public ushort reserved3;
+        public long value0;
+        public long value1;
+    }
 
     [DllImport("oleacc.dll")]
-    public static extern int AccessibleObjectFromWindow(
-        IntPtr hwnd,
-        uint dwId,
-        ref Guid riid,
-        [MarshalAs(UnmanagedType.Interface)] out IAccessible? ppvObject);
-}
+    private static extern int AccessibleObjectFromWindow(
+        IntPtr hwnd, uint dwId, ref Guid riid, out IntPtr ppvObject);
 
-/// <summary>
-/// IAccessible reduced to <c>accLocation</c> (vtable slot 22: IUnknown 0-2,
-/// IDispatch 3-6, IAccessible getters 7-21, accLocation 22).
-/// </summary>
-[ComImport]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-[Guid("618736E0-3C3D-11CF-810C-00AA00389B71")]
-internal interface IAccessible
-{
-    // IDispatch (slots 3-6).
-    [PreserveSig] int _d0();
-    [PreserveSig] int _d1();
-    [PreserveSig] int _d2();
-    [PreserveSig] int _d3();
+    /// <summary>
+    /// Get the caret object for <paramref name="hwnd"/>; returns a null pointer if
+    /// unavailable. The caller must <see cref="Com.Release"/> the result.
+    /// </summary>
+    public static IntPtr GetCaretObject(IntPtr hwnd)
+    {
+        var hr = AccessibleObjectFromWindow(hwnd, OBJID_CARET, ref _iidIAccessible, out var acc);
+        return hr >= 0 ? acc : IntPtr.Zero;
+    }
 
-    // IAccessible getters before accLocation (slots 7-21):
-    // get_accParent, get_accChildCount, get_accChild, get_accName, get_accValue,
-    // get_accDescription, get_accRole, get_accState, get_accHelp, get_accHelpTopic,
-    // get_accKeyboardShortcut, get_accFocus, get_accSelection, get_accDefaultAction,
-    // accSelect.
-    [PreserveSig] int _a00();
-    [PreserveSig] int _a01();
-    [PreserveSig] int _a02();
-    [PreserveSig] int _a03();
-    [PreserveSig] int _a04();
-    [PreserveSig] int _a05();
-    [PreserveSig] int _a06();
-    [PreserveSig] int _a07();
-    [PreserveSig] int _a08();
-    [PreserveSig] int _a09();
-    [PreserveSig] int _a10();
-    [PreserveSig] int _a11();
-    [PreserveSig] int _a12();
-    [PreserveSig] int _a13();
-    [PreserveSig] int _a14();
+    /// <summary>
+    /// IAccessible::accLocation for CHILDID_SELF. Returns the HRESULT; note that
+    /// S_FALSE (1) means "no location", so only S_OK (0) yields usable values.
+    /// </summary>
+    public static int AccLocation(IntPtr accessible, out int left, out int top, out int width, out int height)
+    {
+        var child = new VARIANT { vt = VT_I4, value0 = 0 };
 
-    // Slot 22: accLocation(out left, out top, out width, out height, varChild).
-    [PreserveSig]
-    int accLocation(
-        out int pxLeft,
-        out int pyTop,
-        out int pcxWidth,
-        out int pcyHeight,
-        [MarshalAs(UnmanagedType.Struct)] object varChild);
+        int l, t, w, h;
+        var hr = ((delegate* unmanaged[Stdcall]<IntPtr, int*, int*, int*, int*, VARIANT, int>)
+            Com.Slot(accessible, SlotAccLocation))(accessible, &l, &t, &w, &h, child);
+
+        left = l;
+        top = t;
+        width = w;
+        height = h;
+        return hr;
+    }
 }

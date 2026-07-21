@@ -33,12 +33,15 @@ system caret (`GetGUIThreadInfo`) → MSAA (`oleacc`) → UI Automation
 
 ## Requirements
 
-* **Windows 11 x64.** Windows 10 22H2 x64 works on a best-effort basis (the
-  self-contained binary bundles its own runtime), but note that regular Windows 10
-  Home/Pro is no longer in Microsoft's supported-OS matrix for .NET 10 — only certain
-  LTSC/Enterprise editions are — so it is tested but not officially supported.
-* To build: **.NET 10 SDK** (`dotnet --version` → `10.x`)
-* To run the published binary: **nothing** — it is self-contained.
+* **Windows 11 x64.** Windows 10 22H2 x64 works on a best-effort basis (the binary is
+  fully self-contained), but note that regular Windows 10 Home/Pro is no longer in
+  Microsoft's supported-OS matrix for .NET 10 — only certain LTSC/Enterprise editions
+  are — so it is tested but not officially supported.
+* To build: **.NET 10 SDK** (`dotnet --version` → `10.x`). To *publish*, also Visual
+  Studio or the Build Tools with the **Desktop development with C++** workload —
+  Native AOT needs the MSVC linker.
+* To run the published binary: **nothing** — it is a ~3 MB native executable with no
+  .NET runtime dependency.
 
 The app runs entirely as a normal user; **administrator rights are not required**.
 
@@ -75,7 +78,7 @@ The unit tests cover the gesture-recognition state machine (Ctrl+Shift / Alt+Shi
 Win+Space, cancellation, staleness), the system-hotkey interpretation, popup
 positioning (DPI, multi-monitor, negative coordinates), and settings normalization.
 
-## Publish (self-contained, single-file, x64)
+## Publish (Native AOT, x64)
 
 ```powershell
 .\publish.ps1
@@ -84,13 +87,27 @@ positioning (DPI, multi-monitor, negative coordinates), and settings normalizati
 or directly:
 
 ```powershell
-dotnet publish src\InputLanguagePopup\InputLanguagePopup.csproj -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true `
-  -p:IncludeNativeLibrariesForSelfExtract=true
+dotnet publish src\InputLanguagePopup\InputLanguagePopup.csproj -c Release -r win-x64
 ```
 
-The result is a single `InputLanguagePopup.exe` (~50 MB) in `.\publish\` that runs on
-any Windows 10/11 x64 machine without a pre-installed .NET runtime.
+(`PublishAot` is set in the project file.) Verify a build with:
+
+```powershell
+.\publish\InputLanguagePopup.exe --selftest
+```
+
+which exercises settings, layout detection, the MSAA/UI-Automation caret chain, the
+DPI probe and the layered popup, then writes
+`%LocalAppData%\InputLanguagePopup\selftest.log`.
+
+The result is a single native `InputLanguagePopup.exe` (**~3 MB**) in `.\publish\` that
+runs on any Windows 10/11 x64 machine without a pre-installed .NET runtime.
+
+> The UI is hand-rolled Win32 (window class, message loop, `Shell_NotifyIcon` tray,
+> `TrackPopupMenu`, `SetTimer`) rather than WinForms, because WinForms is not
+> AOT/trim-compatible. Rendering still uses `System.Drawing`, and the COM calls
+> (UI Automation, MSAA) go straight through the object vtables with function
+> pointers, since Native AOT has no built-in COM interop.
 
 ---
 

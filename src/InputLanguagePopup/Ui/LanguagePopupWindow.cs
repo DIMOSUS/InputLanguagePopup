@@ -1,12 +1,13 @@
+using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
-using System.Windows.Forms;
 using InputLanguagePopup.Diagnostics;
 using InputLanguagePopup.Positioning;
 using static InputLanguagePopup.Interop.NativeMethods;
+using static InputLanguagePopup.Interop.Win32Ui;
 
 namespace InputLanguagePopup.Ui;
 
@@ -14,14 +15,40 @@ namespace InputLanguagePopup.Ui;
 /// Borderless, click-through, non-activating layered popup that shows the current
 /// layout code. Display-only: it contains no hook or language-detection logic.
 /// The single instance is created once and reused for every show.
+///
+/// Pure Win32 (no WinForms) so the app can be published with Native AOT; the
+/// rendering still uses System.Drawing, which is AOT-compatible.
 /// </summary>
-public sealed class LanguagePopupForm : Form
+public sealed class LanguagePopupWindow : Win32Window
 {
     /// <summary>Base popup size at 96 DPI — the minimum; width grows with the text.</summary>
     public static readonly Size LogicalSize = new(44, 32);
 
     private const int LogicalHeight = 32;
     private const int LogicalHorizontalPadding = 12; // per side, at 96 DPI
+
+    private const int FadeSteps = 6;
+    private const int FadeIntervalMs = 22;
+
+    private static readonly IntPtr HideTimerId = new(1);
+    private static readonly IntPtr FadeTimerId = new(2);
+
+    private readonly Logger _logger;
+
+    private Bitmap? _currentBitmap;
+    private Point _currentLocation;
+    private Size _currentSize;
+    private int _fadeStep;
+    private bool _hideTimerRunning;
+    private bool _fadeTimerRunning;
+
+    public LanguagePopupWindow(Logger logger)
+        : base("Popup",
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+            WS_POPUP)
+    {
+        _logger = logger;
+    }
 
     /// <summary>
     /// The logical (96-DPI) size needed to render <paramref name="text"/>: fixed
@@ -41,107 +68,96 @@ public sealed class LanguagePopupForm : Form
         return new Size(width, LogicalHeight);
     }
 
-    private readonly System.Windows.Forms.Timer _hideTimer = new();
-    private readonly System.Windows.Forms.Timer _fadeTimer = new();
-
-    private Bitmap? _currentBitmap;
-    private Point _currentLocation;
-    private Size _currentSize;
-    private byte _currentAlpha = 255;
-    private int _fadeStep;
-
-    private const int FadeSteps = 6;
-    private const int FadeIntervalMs = 22;
-
-    private readonly Logger _logger;
-
-    public LanguagePopupForm(Logger logger)
-    {
-        _logger = logger;
-        FormBorderStyle = FormBorderStyle.None;
-        ShowInTaskbar = false;
-        StartPosition = FormStartPosition.Manual;
-        TopMost = true;
-        Text = string.Empty;
-
-        _hideTimer.Tick += OnHideTimerTick;
-        _fadeTimer.Interval = FadeIntervalMs;
-        _fadeTimer.Tick += OnFadeTimerTick;
-
-        // Force native handle creation up front so the first real show has no lag.
-        _ = Handle;
-    }
-
-    // Never steal activation from the foreground application when shown.
-    protected override bool ShowWithoutActivation => true;
-
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ExStyle |= WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW |
-                          WS_EX_TOPMOST | WS_EX_TRANSPARENT;
-            return cp;
-        }
-    }
-
     /// <summary>
     /// Show (or refresh) the popup with the given text and placement. Restarts the
     /// hide timer. Must be called on the UI thread.
     /// </summary>
     public void ShowPopup(string text, PopupPlacement placement, int durationMs)
     {
-        _fadeTimer.Stop();
-        _hideTimer.Stop();
+        StopTimers();
 
-        _currentAlpha = 255;
         _currentLocation = placement.Location;
         _currentSize = placement.Size;
 
         _currentBitmap?.Dispose();
         _currentBitmap = Render(text, placement);
 
-        ApplyBitmap(_currentBitmap, _currentLocation, _currentSize, _currentAlpha);
+        ApplyBitmap(_currentBitmap, _currentLocation, _currentSize, 255);
 
         // Bring topmost and make visible without activating.
         SetWindowPos(Handle, HWND_TOPMOST, _currentLocation.X, _currentLocation.Y,
             _currentSize.Width, _currentSize.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        _hideTimer.Interval = Math.Max(50, durationMs);
-        _hideTimer.Start();
+        SetTimer(Handle, HideTimerId, (uint)Math.Max(50, durationMs), IntPtr.Zero);
+        _hideTimerRunning = true;
     }
 
     public void HidePopup()
     {
-        _hideTimer.Stop();
-        _fadeTimer.Stop();
+        StopTimers();
         SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
     }
 
-    private void OnHideTimerTick(object? sender, EventArgs e)
+    protected override IntPtr WindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
-        _hideTimer.Stop();
+        if (msg == WM_TIMER)
+        {
+            if (wParam == HideTimerId)
+            {
+                OnHideTimer();
+                return IntPtr.Zero;
+            }
+
+            if (wParam == FadeTimerId)
+            {
+                OnFadeTimer();
+                return IntPtr.Zero;
+            }
+        }
+
+        return Default(hWnd, msg, wParam, lParam);
+    }
+
+    private void OnHideTimer()
+    {
+        KillTimer(Handle, HideTimerId);
+        _hideTimerRunning = false;
+
         // Begin a short fade-out (kept cheap: re-blits the same bitmap at lower
         // constant alpha, no re-rendering).
         _fadeStep = 0;
-        _fadeTimer.Start();
+        SetTimer(Handle, FadeTimerId, FadeIntervalMs, IntPtr.Zero);
+        _fadeTimerRunning = true;
     }
 
-    private void OnFadeTimerTick(object? sender, EventArgs e)
+    private void OnFadeTimer()
     {
         _fadeStep++;
         if (_fadeStep >= FadeSteps || _currentBitmap is null)
         {
-            _fadeTimer.Stop();
             HidePopup();
             return;
         }
 
         var alpha = (byte)(255 - (255 * _fadeStep / FadeSteps));
         ApplyBitmap(_currentBitmap, _currentLocation, _currentSize, alpha);
+    }
+
+    private void StopTimers()
+    {
+        if (_hideTimerRunning)
+        {
+            KillTimer(Handle, HideTimerId);
+            _hideTimerRunning = false;
+        }
+
+        if (_fadeTimerRunning)
+        {
+            KillTimer(Handle, FadeTimerId);
+            _fadeTimerRunning = false;
+        }
     }
 
     private static Bitmap Render(string text, PopupPlacement placement)
@@ -273,15 +289,10 @@ public sealed class LanguagePopupForm : Form
         }
     }
 
-    protected override void Dispose(bool disposing)
+    protected override void ReleaseResources()
     {
-        if (disposing)
-        {
-            _hideTimer.Dispose();
-            _fadeTimer.Dispose();
-            _currentBitmap?.Dispose();
-        }
-
-        base.Dispose(disposing);
+        StopTimers();
+        _currentBitmap?.Dispose();
+        _currentBitmap = null;
     }
 }

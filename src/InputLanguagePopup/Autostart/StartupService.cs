@@ -63,16 +63,26 @@ public sealed class StartupService
                     return false; // reason already logged
                 }
 
-                // Only write when the value is missing or points somewhere else —
-                // this repairs a stale path left behind after moving a portable exe.
                 var existing = key.GetValue(ValueName) as string;
-                if (!string.Equals(existing, command, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(existing, command, StringComparison.OrdinalIgnoreCase))
                 {
-                    key.SetValue(ValueName, command);
-                    _logger.Info(existing is null
-                        ? "Autostart entry created."
-                        : "Autostart entry updated to the current executable path.");
+                    return true; // already correct
                 }
+
+                // Repair a *stale* entry (the recorded executable no longer exists,
+                // e.g. the portable exe was moved), but never hijack a valid entry
+                // that points at another existing copy — otherwise simply running a
+                // second/dev build would steal the user's autostart.
+                if (existing is not null && TargetExists(existing))
+                {
+                    _logger.Info("Autostart already points at an existing executable; leaving it unchanged.");
+                    return true;
+                }
+
+                key.SetValue(ValueName, command);
+                _logger.Info(existing is null
+                    ? "Autostart entry created."
+                    : "Autostart entry repaired (previous target no longer exists).");
 
                 return true;
             }
@@ -90,6 +100,24 @@ public sealed class StartupService
             _logger.Error("Failed to update startup registry value.", ex);
             return false;
         }
+    }
+
+    /// <summary>True if the executable quoted in a Run value still exists on disk.</summary>
+    private static bool TargetExists(string command)
+    {
+        var path = command.Trim();
+        if (path.StartsWith('"'))
+        {
+            var end = path.IndexOf('"', 1);
+            if (end < 0)
+            {
+                return false;
+            }
+
+            path = path[1..end];
+        }
+
+        return path.Length > 0 && File.Exists(path);
     }
 
     /// <summary>
